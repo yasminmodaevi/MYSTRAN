@@ -11,21 +11,20 @@ import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d import Axes3D
 
 import pygmsh
 import gmsh
 from pyNastran.bdf.bdf import BDF, MAT1, PSHELL, GRID, CQUAD4, FORCE, SPC1
 
 # Internal FEA Solver using scikit-fem for 2D plane stress
-from skfem import *
-from skfem.models.elasticity import plane_stress
+import skfem as fem
+from skfem.models.elasticity import linear_elasticity, plane_stress
 from skfem.helpers import dot
 
 class MYSTRANGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Python FEM Mesh & BC Generator")
+        self.setWindowTitle("scikit-fem Mesh & BC Generator")
         self.resize(1000, 800)
 
         self.init_ui()
@@ -116,7 +115,7 @@ class MYSTRANGUI(QMainWindow):
         bc_layout.addWidget(QLabel("Constrain DOFs:"))
         dof_layout = QHBoxLayout()
         self.dof_checks = []
-        for i in range(1, 3): # Restricted to 2D for internal solver
+        for i in range(1, 7):
             cb = QCheckBox(str(i))
             self.dof_checks.append(cb)
             dof_layout.addWidget(cb)
@@ -174,7 +173,7 @@ class MYSTRANGUI(QMainWindow):
         self.mesh_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         left_layout.addWidget(self.mesh_btn)
 
-        self.run_btn = QPushButton("Run Solver (Python)")
+        self.run_btn = QPushButton("Run Solver (scikit-fem)")
         self.run_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
         left_layout.addWidget(self.run_btn)
 
@@ -185,7 +184,7 @@ class MYSTRANGUI(QMainWindow):
         left_panel.setWidget(left_widget)
         main_layout.addWidget(left_panel)
 
-        # Right Panel: Visualization (Matplotlib only)
+        # Right Panel: Visualization
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
@@ -290,7 +289,6 @@ class MYSTRANGUI(QMainWindow):
 
         nodes_to_plot = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
 
-        # Plot mesh
         for elem in self.elements:
             pts = nodes_to_plot[elem]
             pts = np.vstack([pts, pts[0]])
@@ -348,34 +346,25 @@ class MYSTRANGUI(QMainWindow):
             return
 
         try:
-            # Internal Solver logic using skfem
-            from skfem import MeshQuad
-            from skfem.models.elasticity import plane_stress
-            from skfem.helpers import dot
-
-            # skfem expects (2, N) for points and (4, M) for elements
             pts = self.nodes[:, :2].T
             els = self.elements.T
-            m = MeshQuad(pts, els)
+            m = fem.MeshQuad(pts, els)
 
-            # Basis
-            basis = Basis(m, ElementQuad1(), dims=2)
+            e = fem.ElementVector(fem.ElementQuad1())
+            basis = fem.Basis(m, e)
 
-            # Parameters
             E = float(self.e_input.text())
             nu = float(self.nu_input.text())
 
-            # Stiffness Matrix
-            K = asm(plane_stress(E, nu), basis)
+            C = plane_stress(E, nu)
+            thickness = float(self.thick_input.text())
+            K = thickness * fem.asm(linear_elasticity(*C), basis)
 
-            # Force Vector
             f = np.zeros(basis.N)
 
-            # Apply distributed loads via surface integral
             for edge_name, data in self.load_data.items():
                 if data['start'] == 0 and data['end'] == 0: continue
 
-                # Identify facets for the edge
                 width = float(self.width_input.text())
                 height = float(self.height_input.text())
                 tol = 1e-5
@@ -393,19 +382,31 @@ class MYSTRANGUI(QMainWindow):
 
                 if len(f_idx) == 0: continue
 
-                # Traction linear form
-                @Functional
-                def traction(w):
-                    # Simplified: using mid-point value for constant/linear
-                    # In a real implementation we would interpolate
-                    mag = (data['start'] + data['end']) / 2.0
-                    direction = np.array([1.0, 0.0]) if data['dir'] == 'X' else np.array([0.0, 1.0])
-                    return dot(mag * direction, w)
+                # Define linearly varying load
+                mag_start = data['start']
+                mag_end = data['end']
+                direction = np.array([1.0, 0.0]) if data['dir'] == 'X' else np.array([0.0, 1.0])
 
-                f_basis = FacetBasis(m, ElementQuad1(), facets=f_idx, dims=2)
-                f += asm(traction, f_basis)
+                @fem.LinearForm
+                def traction(v, w):
+                    # x is the global coordinate
+                    x = w.x
+                    # Interpolate magnitude based on edge position
+                    if edge_name in ["Top", "Bottom"]:
+                        # L is the width
+                        L = float(self.width_input.text())
+                        t = x[0] / L
+                    else:
+                        # L is the height
+                        L = float(self.height_input.text())
+                        t = x[1] / L
 
-            # Apply BCs
+                    mag = mag_start + (mag_end - mag_start) * t
+                    return dot(mag * direction, v)
+
+                f_basis = fem.FacetBasis(m, e, facets=f_idx)
+                f += thickness * fem.asm(traction, f_basis)
+
             D = []
             for edge_name, dofs in self.bc_data.items():
                 width = float(self.width_input.text())
@@ -429,14 +430,9 @@ class MYSTRANGUI(QMainWindow):
 
             D = np.array(list(set(D)))
 
-            # Solve
-            u = solve(*condense(K, f, D=D))
+            u = fem.solve(*fem.condense(K, f, D=D))
 
-            # Map back to full displacement vector
-            u_full = u
-            deformations = u_full.reshape(-1, 2)
-
-            # Display results
+            deformations = u.reshape(-1, 2)
             full_deformations = np.zeros_like(self.nodes)
             full_deformations[:, :2] = deformations
 
@@ -450,9 +446,87 @@ class MYSTRANGUI(QMainWindow):
         except Exception as ex:
             QMessageBox.critical(self, "Solver Error", f"Internal solver failed: {str(ex)}")
 
-    def on_export_bdf(self):
-        # Placeholder for existing BDF export logic if needed
-        QMessageBox.information(self, "Info", "BDF export not required but still available.")
+    def on_export_bdf(self, silent=False):
+        if self.nodes is None or self.elements is None:
+            if not silent: QMessageBox.warning(self, "Error", "Generate mesh first!")
+            return None
+
+        if silent:
+            file_path = "model.bdf"
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save BDF", "", "Nastran Input (*.bdf *.dat)")
+            if not file_path: return None
+
+        try:
+            model = BDF()
+            # Material
+            mid = 1
+            e_mod = float(self.e_input.text())
+            nu = float(self.nu_input.text())
+            model.add_mat1(mid, e_mod, None, nu)
+
+            # Property
+            pid = 1
+            thick = float(self.thick_input.text())
+            model.add_pshell(pid, mid1=mid, t=thick)
+
+            # Nodes
+            for i, p in enumerate(self.nodes):
+                model.add_grid(i + 1, p)
+
+            # Elements
+            for i, elem in enumerate(self.elements):
+                model.add_cquad4(i + 1, pid, [int(n+1) for n in elem])
+
+            # Boundary Conditions (SPC1)
+            spc_id = 1
+            for edge, dofs in self.bc_data.items():
+                node_ids = [int(n+1) for n in self.get_edge_nodes(edge)]
+                if node_ids:
+                    model.add_spc1(spc_id, dofs, node_ids)
+
+            # Loads (FORCE)
+            load_id = 1
+            for edge, data in self.load_data.items():
+                node_ids = self.get_edge_nodes(edge)
+                if not node_ids: continue
+
+                pts = self.nodes[node_ids]
+                if edge in ["Top", "Bottom"]:
+                    idx = np.argsort(pts[:, 0])
+                else:
+                    idx = np.argsort(pts[:, 1])
+                sorted_nodes = np.array(node_ids)[idx]
+                n = len(sorted_nodes)
+
+                for i, nid in enumerate(sorted_nodes):
+                    mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
+                    if mag == 0: continue
+
+                    v = [1.0, 0.0, 0.0] if data['dir'] == 'X' else [0.0, 1.0, 0.0]
+                    model.add_force(load_id, int(nid+1), mag, v)
+
+            # Executive and Case Control
+            model.sol = 101 # Default to SOL 101
+
+            from pyNastran.bdf.case_control_deck import CaseControlDeck
+            case_control_lines = [
+                "TITLE = MYSTRAN EXPORT",
+                f"SPC = {spc_id}",
+                f"LOAD = {load_id}",
+                "DISP = ALL",
+                "STRESS = ALL",
+                "BEGIN BULK"
+            ]
+            model.case_control_deck = CaseControlDeck(case_control_lines)
+
+            model.write_bdf(file_path)
+            if not silent: QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
+            return file_path
+
+        except Exception as e:
+            if not silent: QMessageBox.critical(self, "Error", f"Failed to export BDF: {str(e)}")
+            return None
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
