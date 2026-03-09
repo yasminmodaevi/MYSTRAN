@@ -185,6 +185,26 @@ class MYSTRANGUI(QMainWindow):
         self.export_btn.setStyleSheet("background-color: #008CBA; color: white; font-weight: bold;")
         left_layout.addWidget(self.export_btn)
 
+        # Solver Group
+        solver_group = QGroupBox("Solver")
+        solver_layout = QVBoxLayout()
+
+        path_layout = QHBoxLayout()
+        self.mystran_path_input = QLineEdit("mystran")
+        self.mystran_path_btn = QPushButton("...")
+        self.mystran_path_btn.setFixedWidth(30)
+        path_layout.addWidget(QLabel("MYSTRAN Executable:"))
+        path_layout.addWidget(self.mystran_path_input)
+        path_layout.addWidget(self.mystran_path_btn)
+        solver_layout.addLayout(path_layout)
+
+        self.run_btn = QPushButton("Run MYSTRAN")
+        self.run_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        solver_layout.addWidget(self.run_btn)
+
+        solver_group.setLayout(solver_layout)
+        left_layout.addWidget(solver_group)
+
         left_layout.addStretch()
         left_panel.setWidget(left_widget)
         main_layout.addWidget(left_panel)
@@ -225,6 +245,8 @@ class MYSTRANGUI(QMainWindow):
         # Connect signals
         self.mesh_btn.clicked.connect(self.on_generate_mesh)
         self.export_btn.clicked.connect(self.on_export_bdf)
+        self.run_btn.clicked.connect(self.on_run_mystran)
+        self.mystran_path_btn.clicked.connect(self.select_mystran_path)
         self.viz_toggle.buttonClicked.connect(self.on_viz_toggle)
 
         # Data storage
@@ -281,6 +303,8 @@ class MYSTRANGUI(QMainWindow):
             self.viz_tabs.setCurrentIndex(1)
 
     def on_generate_mesh(self):
+        # Reset deformed nodes
+        if hasattr(self, 'deformed_nodes'): del self.deformed_nodes
         try:
             width = float(self.width_input.text())
             height = float(self.height_input.text())
@@ -373,11 +397,12 @@ class MYSTRANGUI(QMainWindow):
             return [i for i, p in enumerate(self.nodes) if abs(p[1] - height) < tol]
         return []
 
-    def draw_bcs_loads_mpl(self):
+    def draw_bcs_loads_mpl(self, deformed=False):
+        nodes_to_use = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
         # BCs as triangles
         for edge, dofs in self.bc_data.items():
             node_ids = self.get_edge_nodes(edge)
-            pts = self.nodes[node_ids]
+            pts = nodes_to_use[node_ids]
             self.mpl_canvas.axes.scatter(pts[:,0], pts[:,1], pts[:,2], marker='^', color='red', s=50, label=f'BC {edge}')
 
         # Loads as arrows
@@ -386,7 +411,7 @@ class MYSTRANGUI(QMainWindow):
             if not node_ids: continue
 
             # Sort nodes along the edge to apply linear load
-            pts = self.nodes[node_ids]
+            pts = self.nodes[node_ids] # Use original positions for sorting
             if edge in ["Top", "Bottom"]:
                 idx = np.argsort(pts[:, 0])
             else:
@@ -396,7 +421,7 @@ class MYSTRANGUI(QMainWindow):
             n = len(sorted_nodes)
 
             for i, nid in enumerate(sorted_nodes):
-                p = self.nodes[nid]
+                p = nodes_to_use[nid]
                 mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
 
                 dx, dy, dz = 0, 0, 0
@@ -408,12 +433,13 @@ class MYSTRANGUI(QMainWindow):
                 scale = 0.1 * float(self.width_input.text()) / (abs(mag) if mag != 0 else 1)
                 self.mpl_canvas.axes.quiver(p[0], p[1], p[2], dx, dy, dz, length=scale*abs(mag), color='green')
 
-    def draw_bcs_loads_pv(self):
+    def draw_bcs_loads_pv(self, deformed=False):
+        nodes_to_use = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
         # BCs as red points
         for edge, dofs in self.bc_data.items():
             node_ids = self.get_edge_nodes(edge)
             if not node_ids: continue
-            pts = self.nodes[node_ids]
+            pts = nodes_to_use[node_ids]
             self.pv_widget.add_points(pts, color='red', point_size=10, render_points_as_spheres=True, label=f'BC {edge}')
 
         # Loads as arrows
@@ -421,7 +447,7 @@ class MYSTRANGUI(QMainWindow):
             node_ids = self.get_edge_nodes(edge)
             if not node_ids: continue
 
-            pts = self.nodes[node_ids]
+            pts = self.nodes[node_ids] # Original for sorting
             if edge in ["Top", "Bottom"]:
                 idx = np.argsort(pts[:, 0])
             else:
@@ -431,7 +457,7 @@ class MYSTRANGUI(QMainWindow):
             n = len(sorted_nodes)
 
             for i, nid in enumerate(sorted_nodes):
-                p = self.nodes[nid]
+                p = nodes_to_use[nid]
                 mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
                 if mag == 0: continue
 
@@ -449,13 +475,21 @@ class MYSTRANGUI(QMainWindow):
                 arrow = pv.Arrow(start=p - vector, direction=vector, scale=np.linalg.norm(vector))
                 self.pv_widget.add_mesh(arrow, color='green')
 
-    def on_export_bdf(self):
-        if self.nodes is None or self.elements is None:
-            QMessageBox.warning(self, "Error", "Generate mesh first!")
-            return
+    def select_mystran_path(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select MYSTRAN Executable", "", "Executable (*.exe);;All Files (*)")
+        if path:
+            self.mystran_path_input.setText(path)
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save BDF", "", "Nastran Input (*.bdf *.dat)")
-        if not file_path: return
+    def on_export_bdf(self, silent=False):
+        if self.nodes is None or self.elements is None:
+            if not silent: QMessageBox.warning(self, "Error", "Generate mesh first!")
+            return None
+
+        if silent:
+            file_path = "model.bdf"
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save BDF", "", "Nastran Input (*.bdf *.dat)")
+            if not file_path: return None
 
         try:
             model = BDF()
@@ -530,10 +564,116 @@ class MYSTRANGUI(QMainWindow):
                 model.add_eigrl(1, v1=0.0, nd=10)
 
             model.write_bdf(file_path)
-            QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
+            if not silent: QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
+            return file_path
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to export BDF: {str(e)}")
+            if not silent: QMessageBox.critical(self, "Error", f"Failed to export BDF: {str(e)}")
+            return None
+
+    def on_run_mystran(self):
+        bdf_path = self.on_export_bdf(silent=True)
+        if not bdf_path: return
+
+        mystran_exe = self.mystran_path_input.text()
+
+        import subprocess
+        try:
+            # Running MYSTRAN. It usually expects input file as argument
+            result = subprocess.run([mystran_exe, bdf_path], capture_output=True, text=True)
+            if result.returncode != 0:
+                QMessageBox.warning(self, "MYSTRAN Error", f"Solver failed:\n{result.stderr}")
+            else:
+                QMessageBox.information(self, "Success", "MYSTRAN completed successfully!")
+                self.load_results(bdf_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to run solver: {str(e)}")
+
+    def load_results(self, bdf_path):
+        # Result file usually has same name but .op2 or .f06 extension
+        base_path = os.path.splitext(bdf_path)[0]
+        op2_path = base_path + ".op2"
+        f06_path = base_path + ".f06"
+
+        if os.path.exists(op2_path):
+            self.process_op2(op2_path)
+        elif os.path.exists(f06_path):
+            QMessageBox.information(self, "Results", "Parsing .f06 results is not fully implemented, but simulation finished.")
+        else:
+            QMessageBox.warning(self, "Results Error", f"Could not find result file (.op2) at {op2_path}")
+
+    def process_op2(self, op2_path):
+        from pyNastran.op2.op2 import OP2
+        try:
+            op2 = OP2()
+            op2.read_op2(op2_path)
+
+            # Extract displacements for SOL 101 or Eigenvectors for SOL 105
+            # Simplified result loading
+            if hasattr(op2, 'displacements') and op2.displacements:
+                subcase_id = list(op2.displacements.keys())[0]
+                disp = op2.displacements[subcase_id]
+                self.show_deformed_shape(disp.data[0]) # Show first mode or subcase
+            elif hasattr(op2, 'eigenvectors') and op2.eigenvectors:
+                mode_id = list(op2.eigenvectors.keys())[0]
+                eigvec = op2.eigenvectors[mode_id]
+                self.show_deformed_shape(eigvec.data[0]) # Show first mode
+            else:
+                QMessageBox.warning(self, "Results", "No displacements or eigenvectors found in OP2.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to read results: {str(e)}")
+
+    def show_deformed_shape(self, deformations):
+        # deformations is an (N, 6) or similar array
+        # Just update nodes and visualize again
+        # Warning: this modifies self.nodes which might be confusing
+        # Better to have a separate self.deformed_nodes
+        scale = 0.1 * float(self.width_input.text()) / np.max(np.abs(deformations[:, :3]))
+        self.deformed_nodes = self.nodes + deformations[:, :3] * scale
+
+        # Add a mode to show deformed vs undeformed
+        QMessageBox.information(self, "Visualization", "Showing deformed shape (scaled).")
+
+        # Update visualization logic to handle deformed nodes
+        self.update_visualization(deformed=True)
+
+    def update_visualization(self, deformed=False):
+        if self.nodes is None or self.elements is None: return
+
+        # Update Matplotlib
+        self.mpl_canvas.axes.clear()
+
+        nodes_to_plot = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
+
+        # Plot mesh
+        for elem in self.elements:
+            pts = nodes_to_plot[elem]
+            pts = np.vstack([pts, pts[0]])
+            self.mpl_canvas.axes.plot(pts[:, 0], pts[:, 1], pts[:, 2], color='blue', linewidth=0.5)
+
+        self.draw_bcs_loads_mpl(deformed=deformed)
+
+        self.mpl_canvas.axes.set_xlabel('X')
+        self.mpl_canvas.axes.set_ylabel('Y')
+        self.mpl_canvas.axes.set_zlabel('Z')
+        self.mpl_canvas.axes.set_title("Mesh with Results" if deformed else "Mesh with BCs and Loads")
+        self.mpl_canvas.draw()
+
+        # Update PyVista
+        if PYVISTA_AVAILABLE:
+            self.pv_widget.clear()
+            cells = []
+            for elem in self.elements:
+                cells.append(4)
+                cells.extend(elem)
+
+            cell_types = np.full(len(self.elements), pv.CellType.QUAD, dtype=np.uint8)
+            grid = pv.UnstructuredGrid(cells, cell_types, nodes_to_plot)
+            self.pv_widget.add_mesh(grid, show_edges=True, color='cyan', opacity=0.7)
+
+            self.draw_bcs_loads_pv(deformed=deformed)
+            self.pv_widget.add_axes()
+            self.pv_widget.reset_camera()
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
