@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.bdf
+*.dat
+*.SDB
+*.op2
+*.f06
+*.f04
+*.log
+*.zip
+*.pdf
+!Readme.md
