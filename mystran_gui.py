@@ -15,14 +15,22 @@ from matplotlib.figure import Figure
 import pygmsh
 import gmsh
 
-# SciPy for solving
-from scipy.sparse import coo_matrix, csr_matrix
-from scipy.sparse.linalg import spsolve
+# pyccx for buckling problem setup
+try:
+    import pyccx
+    from pyccx.mesh import Mesher
+    from pyccx.analysis import Simulation, AnalysisType, ShellMaterialAssignment
+    from pyccx.material import ElastoPlasticMaterial
+    from pyccx.loadcase import LoadCase
+    from pyccx.bc import BoundaryCondition
+    PYCCX_AVAILABLE = True
+except ImportError:
+    PYCCX_AVAILABLE = False
 
 class MYSTRANGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SciPy FEM Mesh & BC Generator")
+        self.setWindowTitle("pyccx Buckling Mesh & BC Generator")
         self.resize(1000, 800)
 
         self.init_ui()
@@ -90,15 +98,14 @@ class MYSTRANGUI(QMainWindow):
         mat_group.setLayout(mat_layout)
         left_layout.addWidget(mat_group)
 
-        # Units
-        misc_group = QGroupBox("Settings")
-        misc_layout = QGridLayout()
-        misc_layout.addWidget(QLabel("Units:"), 0, 0)
-        self.units_combo = QComboBox()
-        self.units_combo.addItems(["SI (mm, N, MPa)", "SI (m, N, Pa)", "Imperial (in, lb, psi)", "Unitless"])
-        misc_layout.addWidget(self.units_combo, 0, 1)
-        misc_group.setLayout(misc_layout)
-        left_layout.addWidget(misc_group)
+        # Buckling Analysis Group
+        buck_group = QGroupBox("Buckling Settings")
+        buck_layout = QGridLayout()
+        buck_layout.addWidget(QLabel("Number of Modes:"), 0, 0)
+        self.modes_input = QLineEdit("10")
+        buck_layout.addWidget(self.modes_input, 0, 1)
+        buck_group.setLayout(buck_layout)
+        left_layout.addWidget(buck_group)
 
         # Boundary Conditions Group
         bc_group = QGroupBox("Boundary Conditions")
@@ -128,7 +135,7 @@ class MYSTRANGUI(QMainWindow):
         left_layout.addWidget(bc_group)
 
         # Loads Group
-        load_group = QGroupBox("Loads")
+        load_group = QGroupBox("Loads (Pre-stress)")
         load_layout = QVBoxLayout()
 
         self.load_edge_combo = QComboBox()
@@ -138,7 +145,7 @@ class MYSTRANGUI(QMainWindow):
 
         load_layout.addWidget(QLabel("Direction:"))
         self.load_dir_combo = QComboBox()
-        self.load_dir_combo.addItems(["X", "Y"])
+        self.load_dir_combo.addItems(["X", "Y", "Z"])
         load_layout.addWidget(self.load_dir_combo)
 
         load_layout.addWidget(QLabel("Type:"))
@@ -170,12 +177,13 @@ class MYSTRANGUI(QMainWindow):
         self.mesh_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         left_layout.addWidget(self.mesh_btn)
 
-        self.run_btn = QPushButton("Run Solver (SciPy)")
-        self.run_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
-        left_layout.addWidget(self.run_btn)
+        self.export_inp_btn = QPushButton("Generate CalculiX .inp")
+        self.export_inp_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        left_layout.addWidget(self.export_inp_btn)
 
-        self.export_btn = QPushButton("Generate BDF")
-        left_layout.addWidget(self.export_btn)
+        self.export_bdf_btn = QPushButton("Generate MYSTRAN .bdf")
+        self.export_bdf_btn.setStyleSheet("background-color: #008CBA; color: white; font-weight: bold;")
+        left_layout.addWidget(self.export_bdf_btn)
 
         left_layout.addStretch()
         left_panel.setWidget(left_widget)
@@ -191,8 +199,8 @@ class MYSTRANGUI(QMainWindow):
 
         # Connect signals
         self.mesh_btn.clicked.connect(self.on_generate_mesh)
-        self.run_btn.clicked.connect(self.on_run_solver)
-        self.export_btn.clicked.connect(self.on_export_bdf)
+        self.export_inp_btn.clicked.connect(self.on_export_inp)
+        self.export_bdf_btn.clicked.connect(self.on_export_bdf)
 
         # Data storage
         self.bc_data = {}
@@ -242,7 +250,6 @@ class MYSTRANGUI(QMainWindow):
             self.load_list_label.setText(txt)
 
     def on_generate_mesh(self):
-        if hasattr(self, 'deformed_nodes'): del self.deformed_nodes
         try:
             width = float(self.width_input.text())
             height = float(self.height_input.text())
@@ -259,13 +266,11 @@ class MYSTRANGUI(QMainWindow):
                 rect = geom.add_rectangle([0.0, 0.0, 0.0], width, height)
                 hole = geom.add_disk([hx, hy, 0.0], r)
                 geom.boolean_difference(rect, hole)
-
                 gmsh.option.setNumber("Mesh.RecombineAll", 1)
                 gmsh.option.setNumber("Mesh.Algorithm", 8)
                 gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)
                 geom.characteristic_length_min = ms
                 geom.characteristic_length_max = ms
-
                 self.mesh_data = geom.generate_mesh()
 
             self.nodes = self.mesh_data.points
@@ -280,22 +285,16 @@ class MYSTRANGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate mesh: {str(e)}")
 
-    def update_visualization(self, deformed=False):
+    def update_visualization(self):
         if self.nodes is None or self.elements is None: return
         self.mpl_canvas.axes.clear()
-
-        nodes_to_plot = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
-
         for elem in self.elements:
-            pts = nodes_to_plot[elem]
+            pts = self.nodes[elem]
             pts = np.vstack([pts, pts[0]])
             self.mpl_canvas.axes.plot(pts[:, 0], pts[:, 1], pts[:, 2], color='blue', linewidth=0.5)
-
-        self.draw_bcs_loads_mpl(deformed=deformed)
-
+        self.draw_bcs_loads_mpl()
         self.mpl_canvas.axes.set_xlabel('X')
         self.mpl_canvas.axes.set_ylabel('Y')
-        self.mpl_canvas.axes.set_title("SciPy FEM Results" if deformed else "Mesh with BCs and Loads")
         self.mpl_canvas.axes.set_aspect('equal')
         self.mpl_canvas.draw()
 
@@ -303,219 +302,95 @@ class MYSTRANGUI(QMainWindow):
         width = float(self.width_input.text())
         height = float(self.height_input.text())
         tol = 1e-5
-        if edge_name == "Left":
-            return [i for i, p in enumerate(self.nodes) if abs(p[0]) < tol]
-        elif edge_name == "Right":
-            return [i for i, p in enumerate(self.nodes) if abs(p[0] - width) < tol]
-        elif edge_name == "Bottom":
-            return [i for i, p in enumerate(self.nodes) if abs(p[1]) < tol]
-        elif edge_name == "Top":
-            return [i for i, p in enumerate(self.nodes) if abs(p[1] - height) < tol]
+        if edge_name == "Left": return [i for i, p in enumerate(self.nodes) if abs(p[0]) < tol]
+        elif edge_name == "Right": return [i for i, p in enumerate(self.nodes) if abs(p[0] - width) < tol]
+        elif edge_name == "Bottom": return [i for i, p in enumerate(self.nodes) if abs(p[1]) < tol]
+        elif edge_name == "Top": return [i for i, p in enumerate(self.nodes) if abs(p[1] - height) < tol]
         return []
 
-    def draw_bcs_loads_mpl(self, deformed=False):
-        nodes_to_use = self.deformed_nodes if deformed and hasattr(self, 'deformed_nodes') else self.nodes
+    def draw_bcs_loads_mpl(self):
         for edge, dofs in self.bc_data.items():
             node_ids = self.get_edge_nodes(edge)
-            pts = nodes_to_use[node_ids]
+            pts = self.nodes[node_ids]
             self.mpl_canvas.axes.scatter(pts[:,0], pts[:,1], pts[:,2], marker='^', color='red', s=50)
-
         for edge, data in self.load_data.items():
             node_ids = self.get_edge_nodes(edge)
             if not node_ids: continue
             pts = self.nodes[node_ids]
-            if edge in ["Top", "Bottom"]:
-                idx = np.argsort(pts[:, 0])
-            else:
-                idx = np.argsort(pts[:, 1])
+            idx = np.argsort(pts[:, 0 if edge in ["Top", "Bottom"] else 1])
             sorted_nodes = np.array(node_ids)[idx]
-            n = len(sorted_nodes)
             for i, nid in enumerate(sorted_nodes):
-                p = nodes_to_use[nid]
-                mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
-                dx, dy = (mag, 0) if data['dir'] == 'X' else (0, mag)
+                p = self.nodes[nid]
+                mag = data['start'] + (data['end'] - data['start']) * (i / (len(sorted_nodes)-1 if len(sorted_nodes)>1 else 1))
+                dx, dy, dz = (mag, 0, 0) if data['dir'] == 'X' else (0, mag, 0) if data['dir'] == 'Y' else (0, 0, mag)
                 scale = 0.1 * float(self.width_input.text()) / (abs(mag) if mag != 0 else 1)
-                self.mpl_canvas.axes.quiver(p[0], p[1], p[2], dx, dy, 0, length=scale*abs(mag), color='green')
+                self.mpl_canvas.axes.quiver(p[0], p[1], p[2], dx, dy, dz, length=scale*abs(mag), color='green')
 
-    def on_run_solver(self):
+    def on_export_inp(self):
         if self.nodes is None or self.elements is None:
             QMessageBox.warning(self, "Error", "Generate mesh first!")
             return
-
-        try:
-            # Manual FEM implementation using SciPy
-            width = float(self.width_input.text())
-            height = float(self.height_input.text())
-            thick = float(self.thick_input.text())
-            E = float(self.e_input.text())
-            nu = float(self.nu_input.text())
-
-            # Plane Stress D matrix
-            D = (E / (1 - nu**2)) * np.array([
-                [1, nu, 0],
-                [nu, 1, 0],
-                [0, 0, (1 - nu) / 2]
-            ])
-
-            num_nodes = len(self.nodes)
-            K_global = coo_matrix((2*num_nodes, 2*num_nodes))
-            f_global = np.zeros(2*num_nodes)
-
-            # Gauss points
-            gp = 1.0 / np.sqrt(3.0)
-            gauss_pts = [(-gp, -gp), (gp, -gp), (gp, gp), (-gp, gp)]
-            weights = [1, 1, 1, 1]
-
-            rows = []
-            cols = []
-            data_k = []
-
-            for elem in self.elements:
-                nodes_elem = self.nodes[elem][:, :2]
-                Ke = np.zeros((8, 8))
-
-                for (xi, eta), w in zip(gauss_pts, weights):
-                    # Shape functions and derivatives
-                    N = 0.25 * np.array([
-                        (1-xi)*(1-eta), (1+xi)*(1-eta), (1+xi)*(1+eta), (1-xi)*(1+eta)
-                    ])
-                    dN_dxi = 0.25 * np.array([
-                        [-(1-eta), (1-eta), (1+eta), -(1+eta)],
-                        [-(1-xi), -(1+xi), (1+xi), (1-xi)]
-                    ])
-
-                    # Jacobian
-                    J = dN_dxi @ nodes_elem
-                    detJ = np.linalg.det(J)
-                    invJ = np.linalg.inv(J)
-
-                    # B matrix
-                    dN_dx = invJ @ dN_dxi
-                    B = np.zeros((3, 8))
-                    for i in range(4):
-                        B[0, 2*i] = dN_dx[0, i]
-                        B[1, 2*i+1] = dN_dx[1, i]
-                        B[2, 2*i] = dN_dx[1, i]
-                        B[2, 2*i+1] = dN_dx[0, i]
-
-                    Ke += B.T @ D @ B * detJ * w * thick
-
-                # Assembly indices
-                dofs = []
-                for node_idx in elem:
-                    dofs.extend([2*node_idx, 2*node_idx+1])
-
-                for i in range(8):
-                    for j in range(8):
-                        rows.append(dofs[i])
-                        cols.append(dofs[j])
-                        data_k.append(Ke[i, j])
-
-            K_sparse = csr_matrix((data_k, (rows, cols)), shape=(2*num_nodes, 2*num_nodes))
-
-            # Boundary Conditions
-            fixed_dofs = []
-            for edge, dofs_str in self.bc_data.items():
-                nodes_edge = self.get_edge_nodes(edge)
-                for nid in nodes_edge:
-                    if '1' in dofs_str: fixed_dofs.append(2*nid)
-                    if '2' in dofs_str: fixed_dofs.append(2*nid+1)
-
-            fixed_dofs = sorted(list(set(fixed_dofs)))
-
-            # Loads (Simplified as point loads on nodes for now)
-            for edge, data in self.load_data.items():
-                nodes_edge = self.get_edge_nodes(edge)
-                if not nodes_edge: continue
-
-                pts_edge = self.nodes[nodes_edge]
-                sort_idx = np.argsort(pts_edge[:, 0 if edge in ["Top", "Bottom"] else 1])
-                sorted_nodes = np.array(nodes_edge)[sort_idx]
-                n = len(sorted_nodes)
-
-                L_edge = width if edge in ["Top", "Bottom"] else height
-                for i in range(n - 1):
-                    n1 = sorted_nodes[i]
-                    n2 = sorted_nodes[i+1]
-                    l = np.linalg.norm(self.nodes[n1] - self.nodes[n2])
-
-                    p1 = data['start'] + (data['end'] - data['start']) * (np.linalg.norm(self.nodes[n1] - self.nodes[sorted_nodes[0]]) / L_edge)
-                    p2 = data['start'] + (data['end'] - data['start']) * (np.linalg.norm(self.nodes[n2] - self.nodes[sorted_nodes[0]]) / L_edge)
-
-                    # Integral of linearly varying load (p1, p2) over segment l
-                    f1 = (2*p1 + p2) * l / 6.0 * thick
-                    f2 = (p1 + 2*p2) * l / 6.0 * thick
-
-                    idx1 = 2*n1 if data['dir'] == 'X' else 2*n1+1
-                    idx2 = 2*n2 if data['dir'] == 'X' else 2*n2+1
-                    f_global[idx1] += f1
-                    f_global[idx2] += f2
-
-            # Solve system
-            free_dofs = np.setdiff1d(np.arange(2*num_nodes), fixed_dofs)
-            u = np.zeros(2*num_nodes)
-            u[free_dofs] = spsolve(K_sparse[free_dofs, :][:, free_dofs], f_global[free_dofs])
-
-            deformations = u.reshape(-1, 2)
-            full_deformations = np.zeros_like(self.nodes)
-            full_deformations[:, :2] = deformations
-
-            max_disp = np.max(np.abs(deformations))
-            scale = 0.1 * width / (max_disp if max_disp > 0 else 1)
-            self.deformed_nodes = self.nodes + full_deformations * scale
-
-            QMessageBox.information(self, "Success", "SciPy solver completed successfully!")
-            self.update_visualization(deformed=True)
-
-        except Exception as ex:
-            QMessageBox.critical(self, "Solver Error", f"SciPy solver failed: {str(ex)}")
-
-    def on_export_bdf(self, silent=False):
-        if self.nodes is None or self.elements is None:
-            if not silent: QMessageBox.warning(self, "Error", "Generate mesh first!")
-            return None
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save BDF", "", "Nastran Input (*.bdf *.dat)")
-        if not file_path: return None
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save CalculiX INP", "", "CalculiX Input (*.inp)")
+        if not file_path: return
         try:
             with open(file_path, 'w') as f:
-                f.write("ID MYSTRAN, GUI_GEN\n")
-                f.write("SOL 101\n")
-                f.write("CEND\n")
-                f.write("TITLE = MYSTRAN EXPORT\n")
-                spc_id = 1
-                load_id = 1
-                f.write(f"SPC = {spc_id}\n")
-                f.write(f"LOAD = {load_id}\n")
-                f.write("BEGIN BULK\n")
+                f.write("*HEADING\nBuckling Analysis with pyccx\n")
+                f.write("*NODE\n")
+                for i, p in enumerate(self.nodes): f.write(f"{i+1}, {p[0]}, {p[1]}, {p[2]}\n")
+                f.write("*ELEMENT, TYPE=S4, ELSET=PLATE\n")
+                for i, elem in enumerate(self.elements): f.write(f"{i+1}, {elem[0]+1}, {elem[1]+1}, {elem[2]+1}, {elem[3]+1}\n")
+                f.write("*SHELL SECTION, ELSET=PLATE, MATERIAL=MAT1\n")
+                f.write(f"{self.thick_input.text()}\n")
+                f.write("*MATERIAL, NAME=MAT1\n*ELASTIC\n")
+                f.write(f"{self.e_input.text()}, {self.nu_input.text()}\n")
+                # Boundary Conditions
+                for edge, dofs in self.bc_data.items():
+                    nids = self.get_edge_nodes(edge)
+                    for nid in nids:
+                        for d in dofs: f.write(f"*BOUNDARY\n{nid+1}, {d}, {d}, 0.0\n")
+                # Step 1: Pre-stress
+                f.write("*STEP\n*STATIC\n")
+                for edge, data in self.load_data.items():
+                    nids = self.get_edge_nodes(edge)
+                    direction = 1 if data['dir'] == 'X' else 2 if data['dir'] == 'Y' else 3
+                    for nid in nids: f.write(f"*CLOAD\n{nid+1}, {direction}, {data['start']}\n")
+                f.write("*END STEP\n")
+                # Step 2: Buckling
+                f.write("*STEP\n*BUCKLE\n")
+                f.write(f"{self.modes_input.text()}\n")
+                f.write("*END STEP\n")
+            QMessageBox.information(self, "Success", f"CalculiX INP exported to {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export INP: {str(e)}")
+
+    def on_export_bdf(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save MYSTRAN BDF", "", "Nastran Input (*.bdf *.dat)")
+        if not file_path: return
+        try:
+            with open(file_path, 'w') as f:
+                f.write("ID BUCKLING, GEN\nSOL 105\nCEND\nTITLE = BUCKLING ANALYSIS\n")
+                f.write("SPC = 1\nMETHOD = 1\nLOAD = 1\nBEGIN BULK\n")
                 f.write(f"MAT1, 1, {float(self.e_input.text()):1.8E}, , {float(self.nu_input.text()):1.4f}\n")
                 f.write(f"PSHELL, 1, 1, {float(self.thick_input.text()):1.4f}\n")
-                for i, p in enumerate(self.nodes):
-                    f.write(f"GRID, {i+1}, , {p[0]:1.4E}, {p[1]:1.4E}, {p[2]:1.4E}\n")
-                for i, elem in enumerate(self.elements):
-                    n1, n2, n3, n4 = [int(n+1) for n in elem]
-                    f.write(f"CQUAD4, {i+1}, 1, {n1}, {n2}, {n3}, {n4}\n")
+                for i, p in enumerate(self.nodes): f.write(f"GRID, {i+1}, , {p[0]:1.4E}, {p[1]:1.4E}, {p[2]:1.4E}\n")
+                for i, elem in enumerate(self.elements): f.write(f"CQUAD4, {i+1}, 1, {elem[0]+1}, {elem[1]+1}, {elem[2]+1}, {elem[3]+1}\n")
                 for edge, dofs in self.bc_data.items():
                     node_ids = [int(n+1) for n in self.get_edge_nodes(edge)]
                     if node_ids:
                         for j in range(0, len(node_ids), 4):
                             chunk = node_ids[j:j+4]
-                            f.write(f"SPC1, {spc_id}, {dofs}, {', '.join(map(str, chunk))}\n")
+                            f.write(f"SPC1, 1, {dofs}, {', '.join(map(str, chunk))}\n")
                 for edge, data in self.load_data.items():
                     node_ids = self.get_edge_nodes(edge)
                     if not node_ids: continue
-                    sorted_nodes = np.array(node_ids)[np.argsort(self.nodes[node_ids, 0 if edge in ["Top", "Bottom"] else 1])]
-                    n = len(sorted_nodes)
-                    for i, nid in enumerate(sorted_nodes):
-                        mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
-                        if mag != 0:
-                            dir_v = "1.0, 0.0, 0.0" if data['dir'] == 'X' else "0.0, 1.0, 0.0"
-                            f.write(f"FORCE, {load_id}, {nid+1}, 0, {mag:1.4E}, {dir_v}\n")
+                    for i, nid in enumerate(node_ids):
+                        dir_v = "1.0, 0.0, 0.0" if data['dir'] == 'X' else "0.0, 1.0, 0.0" if data['dir'] == 'Y' else "0.0, 0.0, 1.0"
+                        f.write(f"FORCE, 1, {nid+1}, 0, {data['start']:1.4E}, {dir_v}\n")
+                f.write(f"EIGRL, 1, 0.0, , {self.modes_input.text()}\n")
                 f.write("ENDDATA\n")
-            if not silent: QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
-            return file_path
+            QMessageBox.information(self, "Success", f"MYSTRAN BDF exported to {file_path}")
         except Exception as e:
-            if not silent: QMessageBox.critical(self, "Error", f"Failed to export BDF: {str(e)}")
-            return None
+            QMessageBox.critical(self, "Error", f"Failed to export BDF: {str(e)}")
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
@@ -526,10 +401,7 @@ class MplCanvas(FigureCanvas):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MYSTRANGUI()
-    if os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
-        window.show()
+    if os.environ.get('QT_QPA_PLATFORM') != 'offscreen': window.show()
     print("GUI Initialized successfully")
-    if os.environ.get('QT_QPA_PLATFORM') == 'offscreen':
-        sys.exit(0)
-    else:
-        sys.exit(app.exec_())
+    if os.environ.get('QT_QPA_PLATFORM') == 'offscreen': sys.exit(0)
+    else: sys.exit(app.exec_())
