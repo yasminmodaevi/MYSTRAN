@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 
 import pygmsh
 import gmsh
-from pyNastran.bdf.bdf import BDF, MAT1, PSHELL, GRID, CQUAD4, FORCE, SPC1
 
 # Internal FEA Solver using SfePy for 2D plane stress
 from sfepy.discrete.fem import Mesh, FEDomain, Field
@@ -444,32 +443,60 @@ class MYSTRANGUI(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save BDF", "", "Nastran Input (*.bdf *.dat)")
         if not file_path: return None
         try:
-            model = BDF()
-            mid = 1
-            model.add_mat1(mid, float(self.e_input.text()), None, float(self.nu_input.text()))
-            pid = 1
-            model.add_pshell(pid, mid1=mid, t=float(self.thick_input.text()))
-            for i, p in enumerate(self.nodes): model.add_grid(i + 1, p)
-            for i, elem in enumerate(self.elements): model.add_cquad4(i + 1, pid, [int(n+1) for n in elem])
-            spc_id = 1
-            for edge, dofs in self.bc_data.items():
-                node_ids = [int(n+1) for n in self.get_edge_nodes(edge)]
-                if node_ids: model.add_spc1(spc_id, dofs, node_ids)
-            load_id = 1
-            for edge, data in self.load_data.items():
-                node_ids = self.get_edge_nodes(edge)
-                if not node_ids: continue
-                sorted_nodes = np.array(node_ids)[np.argsort(self.nodes[node_ids, 0 if edge in ["Top", "Bottom"] else 1])]
-                n = len(sorted_nodes)
-                for i, nid in enumerate(sorted_nodes):
-                    mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
-                    if mag != 0:
-                        v = [1.0, 0.0, 0.0] if data['dir'] == 'X' else [0.0, 1.0, 0.0]
-                        model.add_force(load_id, int(nid+1), mag, v)
-            model.sol = 101
-            from pyNastran.bdf.case_control_deck import CaseControlDeck
-            model.case_control_deck = CaseControlDeck(["TITLE=EXPORT", f"SPC={spc_id}", f"LOAD={load_id}", "BEGIN BULK"])
-            model.write_bdf(file_path)
+            with open(file_path, 'w') as f:
+                f.write("ID MYSTRAN, GUI_GEN\n")
+                f.write("SOL 101\n")
+                f.write("CEND\n")
+                f.write("TITLE = MYSTRAN EXPORT\n")
+                spc_id = 1
+                load_id = 1
+                f.write(f"SPC = {spc_id}\n")
+                f.write(f"LOAD = {load_id}\n")
+                f.write("DISP = ALL\n")
+                f.write("STRESS = ALL\n")
+                f.write("BEGIN BULK\n")
+
+                # Material (MAT1)
+                e_mod = float(self.e_input.text())
+                nu = float(self.nu_input.text())
+                f.write(f"MAT1, 1, {e_mod:1.8E}, , {nu:1.4f}\n")
+
+                # Property (PSHELL)
+                thick = float(self.thick_input.text())
+                f.write(f"PSHELL, 1, 1, {thick:1.4f}\n")
+
+                # Nodes (GRID)
+                for i, p in enumerate(self.nodes):
+                    f.write(f"GRID, {i+1}, , {p[0]:1.4E}, {p[1]:1.4E}, {p[2]:1.4E}\n")
+
+                # Elements (CQUAD4)
+                for i, elem in enumerate(self.elements):
+                    n1, n2, n3, n4 = [int(n+1) for n in elem]
+                    f.write(f"CQUAD4, {i+1}, 1, {n1}, {n2}, {n3}, {n4}\n")
+
+                # Boundary Conditions (SPC1)
+                for edge, dofs in self.bc_data.items():
+                    node_ids = [int(n+1) for n in self.get_edge_nodes(edge)]
+                    if node_ids:
+                        # Split into lines if many nodes
+                        for j in range(0, len(node_ids), 4):
+                            chunk = node_ids[j:j+4]
+                            f.write(f"SPC1, {spc_id}, {dofs}, {', '.join(map(str, chunk))}\n")
+
+                # Loads (FORCE)
+                for edge, data in self.load_data.items():
+                    node_ids = self.get_edge_nodes(edge)
+                    if not node_ids: continue
+                    sorted_nodes = np.array(node_ids)[np.argsort(self.nodes[node_ids, 0 if edge in ["Top", "Bottom"] else 1])]
+                    n = len(sorted_nodes)
+                    for i, nid in enumerate(sorted_nodes):
+                        mag = data['start'] + (data['end'] - data['start']) * (i / (n-1 if n>1 else 1))
+                        if mag != 0:
+                            dir_v = "1.0, 0.0, 0.0" if data['dir'] == 'X' else "0.0, 1.0, 0.0"
+                            f.write(f"FORCE, {load_id}, {nid+1}, 0, {mag:1.4E}, {dir_v}\n")
+
+                f.write("ENDDATA\n")
+
             if not silent: QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
             return file_path
         except Exception as e:
