@@ -15,20 +15,14 @@ from matplotlib.figure import Figure
 import pygmsh
 import gmsh
 
-# Internal FEA Solver using SfePy for 2D plane stress
-from sfepy.discrete.fem import Mesh, FEDomain, Field
-from sfepy.discrete import (FieldVariable, Integral, Equation, Equations, Problem,
-                            Conditions, Material)
-from sfepy.discrete.conditions import EssentialBC
-from sfepy.terms import Term
-from sfepy.solvers.ls import ScipyDirect
-from sfepy.solvers.nls import Newton
-from sfepy.mechanics.matcoefs import stiffness_from_youngpoisson
+# SciPy for solving
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
 
 class MYSTRANGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SfePy Mesh & BC Generator")
+        self.setWindowTitle("SciPy FEM Mesh & BC Generator")
         self.resize(1000, 800)
 
         self.init_ui()
@@ -176,7 +170,7 @@ class MYSTRANGUI(QMainWindow):
         self.mesh_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         left_layout.addWidget(self.mesh_btn)
 
-        self.run_btn = QPushButton("Run Solver (SfePy)")
+        self.run_btn = QPushButton("Run Solver (SciPy)")
         self.run_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
         left_layout.addWidget(self.run_btn)
 
@@ -301,7 +295,7 @@ class MYSTRANGUI(QMainWindow):
 
         self.mpl_canvas.axes.set_xlabel('X')
         self.mpl_canvas.axes.set_ylabel('Y')
-        self.mpl_canvas.axes.set_title("SfePy FEM Results" if deformed else "Mesh with BCs and Loads")
+        self.mpl_canvas.axes.set_title("SciPy FEM Results" if deformed else "Mesh with BCs and Loads")
         self.mpl_canvas.axes.set_aspect('equal')
         self.mpl_canvas.draw()
 
@@ -349,92 +343,132 @@ class MYSTRANGUI(QMainWindow):
             return
 
         try:
-            # SfePy solver logic
+            # Manual FEM implementation using SciPy
             width = float(self.width_input.text())
             height = float(self.height_input.text())
-            thickness = float(self.thick_input.text())
-            tol = 1e-5
-
-            pts = self.nodes[:, :2].astype(np.float64)
-            els = self.elements.astype(np.int32)
-
-            # SfePy mesh: name, coors, ngroups, conns, mat_ids, descs
-            mesh = Mesh.from_data('mesh', pts, np.zeros(len(pts)), [els], [np.zeros(len(els))], ['2_4'])
-            domain = FEDomain('domain', mesh)
-
-            omega = domain.create_region('Omega', 'all')
-            field = Field.from_args('fu', np.float64, 'vector', omega, approx_order=1)
-            u = FieldVariable('u', 'unknown', field)
-            v = FieldVariable('v', 'test', field, primary_var_name='u')
-
+            thick = float(self.thick_input.text())
             E = float(self.e_input.text())
             nu = float(self.nu_input.text())
-            lame = plane_stress(E, nu)
-            m = Material('m', D=stiffness_from_youngpoisson(2, E, nu)) # Note: SfePy stiffness_from_youngpoisson might expect 3D or specific format
-            # Use Plane Stress Lame parameters
-            m = Material('m', D=thickness * stiffness_from_youngpoisson(2, E, nu)) # Approximation
 
-            t1 = Term.new('dw_lin_elastic(m.D, v, u)', Integral('i', 2), omega, m=m, v=v, u=u)
+            # Plane Stress D matrix
+            D = (E / (1 - nu**2)) * np.array([
+                [1, nu, 0],
+                [nu, 1, 0],
+                [0, 0, (1 - nu) / 2]
+            ])
 
-            terms = [t1]
-            for edge_name, data in self.load_data.items():
-                if data['start'] == 0 and data['end'] == 0: continue
+            num_nodes = len(self.nodes)
+            K_global = coo_matrix((2*num_nodes, 2*num_nodes))
+            f_global = np.zeros(2*num_nodes)
 
-                if edge_name == "Left":
-                    reg = domain.create_region(edge_name, 'vertices in (x < %f)' % tol, 'facet')
-                elif edge_name == "Right":
-                    reg = domain.create_region(edge_name, 'vertices in (x > %f)' % (width - tol), 'facet')
-                elif edge_name == "Bottom":
-                    reg = domain.create_region(edge_name, 'vertices in (y < %f)' % tol, 'facet')
-                elif edge_name == "Top":
-                    reg = domain.create_region(edge_name, 'vertices in (y > %f)' % (height - tol), 'facet')
-                else: continue
+            # Gauss points
+            gp = 1.0 / np.sqrt(3.0)
+            gauss_pts = [(-gp, -gp), (gp, -gp), (gp, gp), (-gp, gp)]
+            weights = [1, 1, 1, 1]
 
-                mag = (data['start'] + data['end']) / 2.0 # Constant approximation for simplicity in SfePy setup
-                f_val = np.array([[mag if data['dir'] == 'X' else 0.0], [mag if data['dir'] == 'Y' else 0.0]])
-                mat_f = Material('f_' + edge_name, val=thickness * f_val)
-                terms.append(Term.new('dw_surface_ltr(mat_f.val, v)', Integral('i', 1), reg, mat_f=mat_f, v=v))
+            rows = []
+            cols = []
+            data_k = []
 
-            eq = Equation('elasticity', sum(terms[1:], terms[0]))
-            eqs = Equations([eq])
+            for elem in self.elements:
+                nodes_elem = self.nodes[elem][:, :2]
+                Ke = np.zeros((8, 8))
 
-            bcs = []
-            for edge_name, dofs in self.bc_data.items():
-                if edge_name == "Left":
-                    reg = domain.create_region('bc_'+edge_name, 'vertices in (x < %f)' % tol, 'facet')
-                elif edge_name == "Right":
-                    reg = domain.create_region('bc_'+edge_name, 'vertices in (x > %f)' % (width - tol), 'facet')
-                elif edge_name == "Bottom":
-                    reg = domain.create_region('bc_'+edge_name, 'vertices in (y < %f)' % tol, 'facet')
-                elif edge_name == "Top":
-                    reg = domain.create_region('bc_'+edge_name, 'vertices in (y > %f)' % (height - tol), 'facet')
-                else: continue
+                for (xi, eta), w in zip(gauss_pts, weights):
+                    # Shape functions and derivatives
+                    N = 0.25 * np.array([
+                        (1-xi)*(1-eta), (1+xi)*(1-eta), (1+xi)*(1+eta), (1-xi)*(1+eta)
+                    ])
+                    dN_dxi = 0.25 * np.array([
+                        [-(1-eta), (1-eta), (1+eta), -(1+eta)],
+                        [-(1-xi), -(1+xi), (1+xi), (1-xi)]
+                    ])
 
-                bc_dict = {}
-                if '1' in dofs: bc_dict['u.0'] = 0.0
-                if '2' in dofs: bc_dict['u.1'] = 0.0
-                if bc_dict:
-                    bcs.append(EssentialBC('ebc_'+edge_name, reg, bc_dict))
+                    # Jacobian
+                    J = dN_dxi @ nodes_elem
+                    detJ = np.linalg.det(J)
+                    invJ = np.linalg.inv(J)
 
-            pb = Problem('problem', equations=eqs)
-            pb.set_bcs(Conditions(bcs))
-            pb.set_solver(Newton({}, lin_solver=ScipyDirect({})))
+                    # B matrix
+                    dN_dx = invJ @ dN_dxi
+                    B = np.zeros((3, 8))
+                    for i in range(4):
+                        B[0, 2*i] = dN_dx[0, i]
+                        B[1, 2*i+1] = dN_dx[1, i]
+                        B[2, 2*i] = dN_dx[1, i]
+                        B[2, 2*i+1] = dN_dx[0, i]
 
-            state = pb.solve()
-            disp = state['u'].data[0].reshape(-1, 2)
+                    Ke += B.T @ D @ B * detJ * w * thick
 
+                # Assembly indices
+                dofs = []
+                for node_idx in elem:
+                    dofs.extend([2*node_idx, 2*node_idx+1])
+
+                for i in range(8):
+                    for j in range(8):
+                        rows.append(dofs[i])
+                        cols.append(dofs[j])
+                        data_k.append(Ke[i, j])
+
+            K_sparse = csr_matrix((data_k, (rows, cols)), shape=(2*num_nodes, 2*num_nodes))
+
+            # Boundary Conditions
+            fixed_dofs = []
+            for edge, dofs_str in self.bc_data.items():
+                nodes_edge = self.get_edge_nodes(edge)
+                for nid in nodes_edge:
+                    if '1' in dofs_str: fixed_dofs.append(2*nid)
+                    if '2' in dofs_str: fixed_dofs.append(2*nid+1)
+
+            fixed_dofs = sorted(list(set(fixed_dofs)))
+
+            # Loads (Simplified as point loads on nodes for now)
+            for edge, data in self.load_data.items():
+                nodes_edge = self.get_edge_nodes(edge)
+                if not nodes_edge: continue
+
+                pts_edge = self.nodes[nodes_edge]
+                sort_idx = np.argsort(pts_edge[:, 0 if edge in ["Top", "Bottom"] else 1])
+                sorted_nodes = np.array(nodes_edge)[sort_idx]
+                n = len(sorted_nodes)
+
+                L_edge = width if edge in ["Top", "Bottom"] else height
+                for i in range(n - 1):
+                    n1 = sorted_nodes[i]
+                    n2 = sorted_nodes[i+1]
+                    l = np.linalg.norm(self.nodes[n1] - self.nodes[n2])
+
+                    p1 = data['start'] + (data['end'] - data['start']) * (np.linalg.norm(self.nodes[n1] - self.nodes[sorted_nodes[0]]) / L_edge)
+                    p2 = data['start'] + (data['end'] - data['start']) * (np.linalg.norm(self.nodes[n2] - self.nodes[sorted_nodes[0]]) / L_edge)
+
+                    # Integral of linearly varying load (p1, p2) over segment l
+                    f1 = (2*p1 + p2) * l / 6.0 * thick
+                    f2 = (p1 + 2*p2) * l / 6.0 * thick
+
+                    idx1 = 2*n1 if data['dir'] == 'X' else 2*n1+1
+                    idx2 = 2*n2 if data['dir'] == 'X' else 2*n2+1
+                    f_global[idx1] += f1
+                    f_global[idx2] += f2
+
+            # Solve system
+            free_dofs = np.setdiff1d(np.arange(2*num_nodes), fixed_dofs)
+            u = np.zeros(2*num_nodes)
+            u[free_dofs] = spsolve(K_sparse[free_dofs, :][:, free_dofs], f_global[free_dofs])
+
+            deformations = u.reshape(-1, 2)
             full_deformations = np.zeros_like(self.nodes)
-            full_deformations[:, :2] = disp
+            full_deformations[:, :2] = deformations
 
-            max_disp = np.max(np.abs(disp))
+            max_disp = np.max(np.abs(deformations))
             scale = 0.1 * width / (max_disp if max_disp > 0 else 1)
             self.deformed_nodes = self.nodes + full_deformations * scale
 
-            QMessageBox.information(self, "Success", "SfePy solver completed successfully!")
+            QMessageBox.information(self, "Success", "SciPy solver completed successfully!")
             self.update_visualization(deformed=True)
 
         except Exception as ex:
-            QMessageBox.critical(self, "Solver Error", f"SfePy solver failed: {str(ex)}")
+            QMessageBox.critical(self, "Solver Error", f"SciPy solver failed: {str(ex)}")
 
     def on_export_bdf(self, silent=False):
         if self.nodes is None or self.elements is None:
@@ -452,38 +486,20 @@ class MYSTRANGUI(QMainWindow):
                 load_id = 1
                 f.write(f"SPC = {spc_id}\n")
                 f.write(f"LOAD = {load_id}\n")
-                f.write("DISP = ALL\n")
-                f.write("STRESS = ALL\n")
                 f.write("BEGIN BULK\n")
-
-                # Material (MAT1)
-                e_mod = float(self.e_input.text())
-                nu = float(self.nu_input.text())
-                f.write(f"MAT1, 1, {e_mod:1.8E}, , {nu:1.4f}\n")
-
-                # Property (PSHELL)
-                thick = float(self.thick_input.text())
-                f.write(f"PSHELL, 1, 1, {thick:1.4f}\n")
-
-                # Nodes (GRID)
+                f.write(f"MAT1, 1, {float(self.e_input.text()):1.8E}, , {float(self.nu_input.text()):1.4f}\n")
+                f.write(f"PSHELL, 1, 1, {float(self.thick_input.text()):1.4f}\n")
                 for i, p in enumerate(self.nodes):
                     f.write(f"GRID, {i+1}, , {p[0]:1.4E}, {p[1]:1.4E}, {p[2]:1.4E}\n")
-
-                # Elements (CQUAD4)
                 for i, elem in enumerate(self.elements):
                     n1, n2, n3, n4 = [int(n+1) for n in elem]
                     f.write(f"CQUAD4, {i+1}, 1, {n1}, {n2}, {n3}, {n4}\n")
-
-                # Boundary Conditions (SPC1)
                 for edge, dofs in self.bc_data.items():
                     node_ids = [int(n+1) for n in self.get_edge_nodes(edge)]
                     if node_ids:
-                        # Split into lines if many nodes
                         for j in range(0, len(node_ids), 4):
                             chunk = node_ids[j:j+4]
                             f.write(f"SPC1, {spc_id}, {dofs}, {', '.join(map(str, chunk))}\n")
-
-                # Loads (FORCE)
                 for edge, data in self.load_data.items():
                     node_ids = self.get_edge_nodes(edge)
                     if not node_ids: continue
@@ -494,9 +510,7 @@ class MYSTRANGUI(QMainWindow):
                         if mag != 0:
                             dir_v = "1.0, 0.0, 0.0" if data['dir'] == 'X' else "0.0, 1.0, 0.0"
                             f.write(f"FORCE, {load_id}, {nid+1}, 0, {mag:1.4E}, {dir_v}\n")
-
                 f.write("ENDDATA\n")
-
             if not silent: QMessageBox.information(self, "Success", f"BDF exported to {file_path}")
             return file_path
         except Exception as e:
