@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QSpinBox)
 from qtpy.QtCore import Qt
 import subprocess
+import os
 import gmsh
 import pyvista as pv
 from pyvistaqt import QtInteractor
@@ -374,17 +375,89 @@ class PlateAnalysisGUI(QMainWindow):
             QMessageBox.critical(self, "Error", str(e))
 
     def load_results(self):
-        # We can try to parse the .dat file for displacement or eigenvalues
-        # For now, let's keep the mesh view and update the status
-        if os.path.exists("analysis.dat"):
-             self.res_combo.clear()
-             self.res_combo.addItems(["Mesh Only", "Analysis Result (See .dat)"])
-             QMessageBox.information(self, "Results", "Results generated in analysis.dat and analysis.frd.")
+        from pyccx.results.results import ResultProcessor, ResultsValue
+
+        frd_file = "analysis.frd"
+        if not os.path.exists(frd_file):
+            return
+
+        try:
+            self.results_processor = ResultProcessor("analysis")
+            self.results_processor.read()
+
+            self.res_combo.clear()
+            self.res_combo.addItem("Mesh Only")
+
+            for inc in range(1, self.results_processor.numIncrements + 1):
+                self.res_combo.addItem(f"Increment {inc}")
+
+            QMessageBox.information(self, "Results", f"Loaded {self.results_processor.numIncrements} increments from {frd_file}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Results Error", f"Failed to load .frd file: {str(e)}")
 
     def update_visualization(self):
-        if self.res_combo.currentText() == "Mesh Only":
+        current = self.res_combo.currentText()
+        if current == "Mesh Only":
             if os.path.exists("plate.msh"):
                 self.visualize_mesh("plate.msh")
+        elif current.startswith("Increment"):
+            inc_idx = int(current.split()[-1])
+            self.visualize_result(inc_idx)
+
+    def visualize_result(self, inc_idx):
+        from pyccx.results.results import ResultsValue
+        try:
+            # Get displacement
+            node_ids, disp_vals = self.results_processor.getNodeResult(inc_idx, ResultsValue.DISP)
+
+            # Use original mesh
+            import meshio
+            mesh = meshio.read("plate.msh")
+            points = mesh.points.copy()
+            cells = mesh.cells_dict
+
+            # Map disp_vals to points (CalculiX nodes start at 1)
+            # node_ids is 1-indexed
+            displacement = np.zeros_like(points)
+            for i, nid in enumerate(node_ids):
+                if nid <= len(points):
+                    displacement[nid-1] = disp_vals[i]
+
+            # Deform points (scale for visibility)
+            scale = 10.0 # Default scale
+            deformed_points = points + displacement * scale
+
+            # PyVista
+            etype = self.etype_combo.currentText()
+            if etype == "QUAD4":
+                quad_cells = cells['quad']
+                cell_type = pv.CellType.QUAD
+            else:
+                if 'quad9' in cells:
+                    quad_cells = cells['quad9'][:, :8]
+                else:
+                    quad_cells = cells['quad8']
+                cell_type = pv.CellType.QUADRATIC_QUAD
+
+            num_cells = quad_cells.shape[0]
+            pts_per_cell = quad_cells.shape[1]
+            cells_pv = np.hstack([np.full((num_cells, 1), pts_per_cell), quad_cells])
+            cell_types = np.full(num_cells, cell_type, dtype=np.uint8)
+
+            grid = pv.UnstructuredGrid(cells_pv, cell_types, deformed_points)
+
+            # Add displacement magnitude as scalar
+            mag = np.linalg.norm(displacement, axis=1)
+            grid.point_data["Displacement"] = mag
+
+            self.plotter.clear()
+            self.plotter.add_mesh(grid, show_edges=True, scalars="Displacement", cmap="jet")
+            self.plotter.add_text(f"Increment {inc_idx} - Displacement (Scale: {scale}x)", font_size=10)
+            self.plotter.view_xy()
+            # self.plotter.reset_camera() # Keep camera if possible?
+        except Exception as e:
+            QMessageBox.critical(self, "Viz Error", str(e))
 
     def write_calculix_inp(self):
         import meshio
@@ -524,8 +597,11 @@ class PlateAnalysisGUI(QMainWindow):
                     f.write("*DLOAD\n")
                     f.write(f"EALL, P, {pres}\n")
 
+            # Output to FRD for visualization
             f.write("*NODE FILE\nU\n")
             f.write("*EL FILE\nS\n")
+            # For linear buckling/frequency, we also want the displacements
+            # CalculiX should output them to FRD by default with *NODE FILE, U
             f.write("*END STEP\n")
 
         QMessageBox.information(self, "Success", "CalculiX input file 'analysis.inp' generated.")
