@@ -348,7 +348,14 @@ class PlateAnalysisGUI(QMainWindow):
     def run_analysis(self):
         try:
             self.generate_mesh() # Ensure mesh is up to date
+            if not os.path.exists("plate.msh"):
+                QMessageBox.critical(self, "Error", "Mesh generation failed. Cannot run analysis.")
+                return
+
             self.write_calculix_inp()
+            if not os.path.exists("analysis.inp"):
+                QMessageBox.critical(self, "Error", "CalculiX input file generation failed.")
+                return
 
             # Run CalculiX
             ccx_path = r"C:\calculix_2.23_4win\ccx_static.exe"
@@ -402,14 +409,15 @@ class PlateAnalysisGUI(QMainWindow):
             if os.path.exists("plate.msh"):
                 self.visualize_mesh("plate.msh")
         elif current.startswith("Increment"):
-            inc_idx = int(current.split()[-1])
+            inc_idx = self.res_combo.currentIndex() # Index 1 corresponds to first increment
             self.visualize_result(inc_idx)
+
 
     def visualize_result(self, inc_idx):
         from pyccx.results.results import ResultsValue
         try:
-            # Get displacement
-            node_ids, disp_vals = self.results_processor.getNodeResult(inc_idx, ResultsValue.DISP)
+            # inc_idx from combo matches 1-based increment index
+            increment = self.results_processor.increments[inc_idx]
 
             # Use original mesh
             import meshio
@@ -417,15 +425,42 @@ class PlateAnalysisGUI(QMainWindow):
             points = mesh.points.copy()
             cells = mesh.cells_dict
 
-            # Map disp_vals to points (CalculiX nodes start at 1)
+            # Map results to points
             # node_ids is 1-indexed
             displacement = np.zeros_like(points)
-            for i, nid in enumerate(node_ids):
-                if nid <= len(points):
-                    displacement[nid-1] = disp_vals[i]
+            stress_vm = np.zeros(len(points))
+
+            # Try to get displacement
+            try:
+                node_ids_u, disp_vals = self.results_processor.getNodeResult(increment, ResultsValue.DISP)
+                for i, nid in enumerate(node_ids_u):
+                    if nid <= len(points):
+                        displacement[nid-1] = disp_vals[i]
+            except:
+                pass
+
+            # Try to get nodal stress
+            try:
+                # CalculiX often outputs stress to nodes in FRD if requested
+                node_ids_s, stress_vals = self.results_processor.getNodeResult(increment, ResultsValue.STRESS)
+                # stress_vals: [Sxx, Syy, Szz, Sxy, Syz, Szx]
+                for i, nid in enumerate(node_ids_s):
+                    if nid <= len(points):
+                        s = stress_vals[i]
+                        # Von Mises: sqrt(Sxx^2 + Syy^2 + Szz^2 - SxxSyy - SyySzz - SzzSxx + 3(Sxy^2 + Syz^2 + Szx^2))
+                        vm = np.sqrt(s[0]**2 + s[1]**2 + s[2]**2 - s[0]*s[1] - s[1]*s[2] - s[2]*s[0] + 3*(s[3]**2 + s[4]**2 + s[5]**2))
+                        stress_vm[nid-1] = vm
+            except:
+                pass
 
             # Deform points (scale for visibility)
-            scale = 10.0 # Default scale
+            max_disp = np.max(np.linalg.norm(displacement, axis=1))
+            max_dim = max(self.inp_a.value(), self.inp_b.value())
+            if max_disp > 1e-12:
+                scale = (max_dim * 0.1) / max_disp
+            else:
+                scale = 1.0
+
             deformed_points = points + displacement * scale
 
             # PyVista
@@ -447,17 +482,18 @@ class PlateAnalysisGUI(QMainWindow):
 
             grid = pv.UnstructuredGrid(cells_pv, cell_types, deformed_points)
 
-            # Add displacement magnitude as scalar
-            mag = np.linalg.norm(displacement, axis=1)
-            grid.point_data["Displacement"] = mag
+            # Add data
+            grid.point_data["Displacement"] = np.linalg.norm(displacement, axis=1)
+            grid.point_data["VonMises"] = stress_vm
 
             self.plotter.clear()
-            self.plotter.add_mesh(grid, show_edges=True, scalars="Displacement", cmap="jet")
-            self.plotter.add_text(f"Increment {inc_idx} - Displacement (Scale: {scale}x)", font_size=10)
+            # Default to Von Mises if available, else Displacement
+            active_scalar = "VonMises" if np.max(stress_vm) > 0 else "Displacement"
+            self.plotter.add_mesh(grid, show_edges=True, scalars=active_scalar, cmap="jet")
+            self.plotter.add_text(f"Increment {inc_idx} - {active_scalar} (Deformation: {scale:.1f}x)", font_size=10)
             self.plotter.view_xy()
-            # self.plotter.reset_camera() # Keep camera if possible?
         except Exception as e:
-            QMessageBox.critical(self, "Viz Error", str(e))
+            QMessageBox.critical(self, "Viz Error", f"Visualization failed: {str(e)}")
 
     def write_calculix_inp(self):
         import meshio
@@ -598,8 +634,7 @@ class PlateAnalysisGUI(QMainWindow):
                     f.write(f"EALL, P, {pres}\n")
 
             # Output to FRD for visualization
-            f.write("*NODE FILE\nU\n")
-            f.write("*EL FILE\nS\n")
+            f.write("*NODE FILE\nU, S\n")
             # For linear buckling/frequency, we also want the displacements
             # CalculiX should output them to FRD by default with *NODE FILE, U
             f.write("*END STEP\n")

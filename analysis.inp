@@ -17924,7 +17924,5 @@ Plate Analysis
 *STATIC
 *CLOAD
 *NODE FILE
-U
-*EL FILE
-S
+U, S
 *END STEP
