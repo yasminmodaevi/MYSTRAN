@@ -122,6 +122,11 @@ class PlateAnalysisGUI(QMainWindow):
         self.res_combo.currentIndexChanged.connect(self.update_visualization)
         result_ctrl_layout.addWidget(QLabel("View Result:"))
         result_ctrl_layout.addWidget(self.res_combo)
+
+        self.btn_cgx = QPushButton("Open in CGX")
+        self.btn_cgx.clicked.connect(self.open_in_cgx)
+        result_ctrl_layout.addWidget(self.btn_cgx)
+
         result_layout.addLayout(result_ctrl_layout)
 
         right_panel.addTab(self.result_tab, "Visualization")
@@ -412,6 +417,16 @@ class PlateAnalysisGUI(QMainWindow):
             inc_idx = self.res_combo.currentIndex() # Index 1 corresponds to first increment
             self.visualize_result(inc_idx)
 
+    def open_in_cgx(self):
+        cgx_path = r"C:\calculix_2.23_4win\cgx_static.exe"
+        frd_file = "analysis.frd"
+        if os.path.exists(frd_file):
+            try:
+                subprocess.Popen([cgx_path, frd_file])
+            except Exception as e:
+                QMessageBox.critical(self, "CGX Error", f"Failed to launch CGX: {str(e)}")
+        else:
+            QMessageBox.warning(self, "CGX Warning", "Results file 'analysis.frd' not found.")
 
     def visualize_result(self, inc_idx):
         from pyccx.results.results import ResultsValue
