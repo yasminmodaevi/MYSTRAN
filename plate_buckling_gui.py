@@ -350,10 +350,12 @@ class PlateAnalysisGUI(QMainWindow):
             self.write_calculix_inp()
 
             # Run CalculiX
-            # ccx is usually the command name.
-            # We assume it's in the path as per requirements.
+            ccx_path = r"C:\calculix_2.23_4win\ccx_static.exe"
             job_name = "analysis"
-            process = subprocess.Popen(["ccx", job_name],
+
+            # Note: We use the absolute path for ccx.
+            # If on Linux/Mac, the Windows path will fail, but we follow the user's requirement.
+            process = subprocess.Popen([ccx_path, job_name],
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE,
                                      text=True)
@@ -366,7 +368,8 @@ class PlateAnalysisGUI(QMainWindow):
                 self.load_results()
 
         except FileNotFoundError:
-            QMessageBox.critical(self, "Error", "CalculiX executable 'ccx' not found in system path.")
+            ccx_path = r"C:\calculix_2.23_4win\ccx_static.exe"
+            QMessageBox.critical(self, "Error", f"CalculiX executable not found at: {ccx_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
