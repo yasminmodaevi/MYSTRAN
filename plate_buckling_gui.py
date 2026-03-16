@@ -319,36 +319,14 @@ class PlateAnalysisGUI(QMainWindow):
         import meshio
         mesh = meshio.read(filename)
 
-        # Convert to VTK/PyVista
-        points = mesh.points
-        cells = mesh.cells_dict
+        # Clean up cell types for PyVista compatibility if needed
+        # (Converting Gmsh quad9 to quad8 handled by pyvista.from_meshio)
+        grid = pv.from_meshio(mesh)
 
-        # We look for 'quad' or 'quad9' (Gmsh 2nd order)
-        if 'quad' in cells:
-            quad_cells = cells['quad']
-            cell_type = pv.CellType.QUAD
-        elif 'quad9' in cells:
-            quad_cells = cells['quad9'][:, :8] # Convert to QUAD8 for PV (which uses 8 points)
-            cell_type = pv.CellType.QUADRATIC_QUAD
-        elif 'quad8' in cells:
-            quad_cells = cells['quad8']
-            cell_type = pv.CellType.QUADRATIC_QUAD
-        else:
-            quad_cells = None
-
-        if quad_cells is not None:
-            # PyVista UnstructuredGrid needs [n_points, p1, p2, ...] format
-            num_cells = quad_cells.shape[0]
-            pts_per_cell = quad_cells.shape[1]
-            cells_pv = np.hstack([np.full((num_cells, 1), pts_per_cell), quad_cells])
-            cell_types = np.full(num_cells, cell_type, dtype=np.uint8)
-
-            grid = pv.UnstructuredGrid(cells_pv, cell_types, points)
-
-            self.plotter.clear()
-            self.plotter.add_mesh(grid, show_edges=True, color="lightblue")
-            self.plotter.view_xy()
-            self.plotter.reset_camera()
+        self.plotter.clear()
+        self.plotter.add_mesh(grid, show_edges=True, color="lightblue")
+        self.plotter.view_xy()
+        self.plotter.reset_camera()
 
     def run_analysis(self):
         try:
@@ -430,22 +408,20 @@ class PlateAnalysisGUI(QMainWindow):
 
     def visualize_result(self, inc_idx):
         from pyccx.results.results import ResultsValue
+        import meshio
         try:
             # inc_idx from combo matches 1-based increment index
             increment = self.results_processor.increments[inc_idx]
 
-            # Use original mesh
-            import meshio
+            # Load mesh
             mesh = meshio.read("plate.msh")
             points = mesh.points.copy()
-            cells = mesh.cells_dict
 
             # Map results to points
-            # node_ids is 1-indexed
             displacement = np.zeros_like(points)
             stress_vm = np.zeros(len(points))
 
-            # Try to get displacement
+            # Displacement
             try:
                 node_ids_u, disp_vals = self.results_processor.getNodeResult(increment, ResultsValue.DISP)
                 for i, nid in enumerate(node_ids_u):
@@ -454,59 +430,38 @@ class PlateAnalysisGUI(QMainWindow):
             except:
                 pass
 
-            # Try to get nodal stress
+            # Stress
             try:
-                # CalculiX often outputs stress to nodes in FRD if requested
                 node_ids_s, stress_vals = self.results_processor.getNodeResult(increment, ResultsValue.STRESS)
-                # stress_vals: [Sxx, Syy, Szz, Sxy, Syz, Szx]
                 for i, nid in enumerate(node_ids_s):
                     if nid <= len(points):
                         s = stress_vals[i]
-                        # Von Mises: sqrt(Sxx^2 + Syy^2 + Szz^2 - SxxSyy - SyySzz - SzzSxx + 3(Sxy^2 + Syz^2 + Szx^2))
                         vm = np.sqrt(s[0]**2 + s[1]**2 + s[2]**2 - s[0]*s[1] - s[1]*s[2] - s[2]*s[0] + 3*(s[3]**2 + s[4]**2 + s[5]**2))
                         stress_vm[nid-1] = vm
             except:
                 pass
 
-            # Deform points (scale for visibility)
+            # Auto-scale deformation
             max_disp = np.max(np.linalg.norm(displacement, axis=1))
             max_dim = max(self.inp_a.value(), self.inp_b.value())
-            if max_disp > 1e-12:
-                scale = (max_dim * 0.1) / max_disp
-            else:
-                scale = 1.0
+            scale = (max_dim * 0.1) / max_disp if max_disp > 1e-12 else 1.0
 
-            deformed_points = points + displacement * scale
+            # Update mesh with results for pyvista
+            mesh.points = points + displacement * scale
+            mesh.point_data = {
+                "Displacement": np.linalg.norm(displacement, axis=1),
+                "VonMises": stress_vm
+            }
 
-            # PyVista
-            etype = self.etype_combo.currentText()
-            if etype == "QUAD4":
-                quad_cells = cells['quad']
-                cell_type = pv.CellType.QUAD
-            else:
-                if 'quad9' in cells:
-                    quad_cells = cells['quad9'][:, :8]
-                else:
-                    quad_cells = cells['quad8']
-                cell_type = pv.CellType.QUADRATIC_QUAD
-
-            num_cells = quad_cells.shape[0]
-            pts_per_cell = quad_cells.shape[1]
-            cells_pv = np.hstack([np.full((num_cells, 1), pts_per_cell), quad_cells])
-            cell_types = np.full(num_cells, cell_type, dtype=np.uint8)
-
-            grid = pv.UnstructuredGrid(cells_pv, cell_types, deformed_points)
-
-            # Add data
-            grid.point_data["Displacement"] = np.linalg.norm(displacement, axis=1)
-            grid.point_data["VonMises"] = stress_vm
+            # Convert meshio to pyvista
+            grid = pv.from_meshio(mesh)
 
             self.plotter.clear()
-            # Default to Von Mises if available, else Displacement
             active_scalar = "VonMises" if np.max(stress_vm) > 0 else "Displacement"
             self.plotter.add_mesh(grid, show_edges=True, scalars=active_scalar, cmap="jet")
             self.plotter.add_text(f"Increment {inc_idx} - {active_scalar} (Deformation: {scale:.1f}x)", font_size=10)
             self.plotter.view_xy()
+
         except Exception as e:
             QMessageBox.critical(self, "Viz Error", f"Visualization failed: {str(e)}")
 
