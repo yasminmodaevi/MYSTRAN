@@ -123,6 +123,14 @@ class PlateAnalysisGUI(QMainWindow):
         result_ctrl_layout.addWidget(QLabel("View Result:"))
         result_ctrl_layout.addWidget(self.res_combo)
 
+        result_ctrl_layout.addWidget(QLabel("Scale:"))
+        self.inp_scale = QDoubleSpinBox()
+        self.inp_scale.setRange(0, 10000)
+        self.inp_scale.setValue(1.0)
+        self.inp_scale.setToolTip("0 = Auto-scale")
+        self.inp_scale.valueChanged.connect(self.update_visualization)
+        result_ctrl_layout.addWidget(self.inp_scale)
+
         self.btn_cgx = QPushButton("Open in CGX")
         self.btn_cgx.clicked.connect(self.open_in_cgx)
         result_ctrl_layout.addWidget(self.btn_cgx)
@@ -365,7 +373,7 @@ class PlateAnalysisGUI(QMainWindow):
             QMessageBox.critical(self, "Error", str(e))
 
     def load_results(self):
-        from pyccx.results.results import ResultProcessor, ResultsValue
+        from pyccx.results.results import ResultProcessor
 
         frd_file = "analysis.frd"
         if not os.path.exists(frd_file):
@@ -378,22 +386,34 @@ class PlateAnalysisGUI(QMainWindow):
             self.res_combo.clear()
             self.res_combo.addItem("Mesh Only")
 
-            for inc in range(1, self.results_processor.numIncrements + 1):
-                self.res_combo.addItem(f"Increment {inc}")
+            analysis_type = self.analysis_combo.currentText()
+            for inc in sorted(self.results_processor.increments.keys()):
+                label = f"Increment {inc}"
+                if analysis_type == "Linear Buckling":
+                    label = f"Mode {inc}"
+                elif analysis_type == "Normal Modes":
+                    label = f"Freq Mode {inc}"
+                self.res_combo.addItem(label)
 
-            QMessageBox.information(self, "Results", f"Loaded {self.results_processor.numIncrements} increments from {frd_file}")
+            if self.results_processor.numIncrements > 0:
+                self.res_combo.setCurrentIndex(1)
+                QMessageBox.information(self, "Results", f"Loaded {self.results_processor.numIncrements} results.")
 
         except Exception as e:
-            QMessageBox.critical(self, "Results Error", f"Failed to load .frd file: {str(e)}")
+            QMessageBox.critical(self, "Results Error", f"Failed to load results: {str(e)}")
 
     def update_visualization(self):
         current = self.res_combo.currentText()
         if current == "Mesh Only":
             if os.path.exists("plate.msh"):
                 self.visualize_mesh("plate.msh")
-        elif current.startswith("Increment"):
-            inc_idx = self.res_combo.currentIndex() # Index 1 corresponds to first increment
-            self.visualize_result(inc_idx)
+        elif "Mode" in current or "Increment" in current:
+            inc_idx = self.res_combo.currentIndex()
+            # The keys in results_processor.increments should match the combo index
+            # assuming we added them in order.
+            actual_keys = sorted(self.results_processor.increments.keys())
+            if inc_idx - 1 < len(actual_keys):
+                self.visualize_result(actual_keys[inc_idx - 1])
 
     def open_in_cgx(self):
         cgx_path = r"C:\calculix_2.23_4win\cgx_static.exe"
@@ -406,60 +426,64 @@ class PlateAnalysisGUI(QMainWindow):
         else:
             QMessageBox.warning(self, "CGX Warning", "Results file 'analysis.frd' not found.")
 
-    def visualize_result(self, inc_idx):
+    def visualize_result(self, inc_key):
         from pyccx.results.results import ResultsValue
         import meshio
         try:
-            # inc_idx from combo matches 1-based increment index
-            increment = self.results_processor.increments[inc_idx]
+            increment = self.results_processor.increments[inc_key]
 
             # Load mesh
             mesh = meshio.read("plate.msh")
             points = mesh.points.copy()
 
             # Map results to points
+            # node_ids is 1-indexed from CalculiX
             displacement = np.zeros_like(points)
             stress_vm = np.zeros(len(points))
 
-            # Displacement
+            # Try to get displacement
             try:
                 node_ids_u, disp_vals = self.results_processor.getNodeResult(increment, ResultsValue.DISP)
                 for i, nid in enumerate(node_ids_u):
                     if nid <= len(points):
-                        displacement[nid-1] = disp_vals[i]
-            except:
-                pass
+                        # points are 0-indexed, nid is 1-indexed
+                        displacement[nid-1] = disp_vals[i][:3]
+            except: pass
 
-            # Stress
+            # Try to get nodal stress
             try:
                 node_ids_s, stress_vals = self.results_processor.getNodeResult(increment, ResultsValue.STRESS)
                 for i, nid in enumerate(node_ids_s):
                     if nid <= len(points):
                         s = stress_vals[i]
+                        # s: [Sxx, Syy, Szz, Sxy, Syz, Szx]
                         vm = np.sqrt(s[0]**2 + s[1]**2 + s[2]**2 - s[0]*s[1] - s[1]*s[2] - s[2]*s[0] + 3*(s[3]**2 + s[4]**2 + s[5]**2))
                         stress_vm[nid-1] = vm
-            except:
-                pass
+            except: pass
 
-            # Auto-scale deformation
-            max_disp = np.max(np.linalg.norm(displacement, axis=1))
-            max_dim = max(self.inp_a.value(), self.inp_b.value())
-            scale = (max_dim * 0.1) / max_disp if max_disp > 1e-12 else 1.0
+            # Scale deformation
+            user_scale = self.inp_scale.value()
+            if user_scale > 0:
+                scale = user_scale
+            else:
+                max_disp = np.max(np.linalg.norm(displacement, axis=1))
+                max_dim = max(self.inp_a.value(), self.inp_b.value())
+                scale = (max_dim * 0.1) / max_disp if max_disp > 1e-12 else 1.0
 
-            # Update mesh with results for pyvista
+            # Update mesh
             mesh.points = points + displacement * scale
             mesh.point_data = {
                 "Displacement": np.linalg.norm(displacement, axis=1),
                 "VonMises": stress_vm
             }
 
-            # Convert meshio to pyvista
+            # Convert to pyvista
             grid = pv.from_meshio(mesh)
 
             self.plotter.clear()
             active_scalar = "VonMises" if np.max(stress_vm) > 0 else "Displacement"
             self.plotter.add_mesh(grid, show_edges=True, scalars=active_scalar, cmap="jet")
-            self.plotter.add_text(f"Increment {inc_idx} - {active_scalar} (Deformation: {scale:.1f}x)", font_size=10)
+            self.plotter.add_text(f"Result: {self.res_combo.currentText()}\nField: {active_scalar}\nScale: {scale:.1f}x", font_size=10)
             self.plotter.view_xy()
 
         except Exception as e:
