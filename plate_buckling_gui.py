@@ -78,6 +78,11 @@ class PlateAnalysisGUI(QMainWindow):
         # 4. Analysis Group
         analysis_group = QGroupBox("Analysis")
         analysis_form = QFormLayout()
+
+        self.solver_combo = QComboBox()
+        self.solver_combo.addItems(["CalculiX", "GetDP"])
+        analysis_form.addRow("Solver:", self.solver_combo)
+
         self.analysis_combo = QComboBox()
         self.analysis_combo.addItems(["Linear Static", "Nonlinear Static", "Linear Buckling", "Normal Modes"])
         self.inp_bm = QSpinBox(); self.inp_bm.setRange(1, 100); self.inp_bm.setValue(5)
@@ -343,17 +348,24 @@ class PlateAnalysisGUI(QMainWindow):
                 QMessageBox.critical(self, "Error", "Mesh generation failed. Cannot run analysis.")
                 return
 
+            solver = self.solver_combo.currentText()
+            if solver == "CalculiX":
+                self.run_calculix()
+            elif solver == "GetDP":
+                self.run_getdp()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def run_calculix(self):
+        try:
             self.write_calculix_inp()
             if not os.path.exists("analysis.inp"):
                 QMessageBox.critical(self, "Error", "CalculiX input file generation failed.")
                 return
 
-            # Run CalculiX
             ccx_path = r"C:\calculix_2.23_4win\ccx_static.exe"
             job_name = "analysis"
-
-            # Note: We use the absolute path for ccx.
-            # If on Linux/Mac, the Windows path will fail, but we follow the user's requirement.
             process = subprocess.Popen([ccx_path, job_name],
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE,
@@ -365,12 +377,113 @@ class PlateAnalysisGUI(QMainWindow):
             else:
                 QMessageBox.information(self, "Analysis Complete", "CalculiX finished successfully.")
                 self.load_results()
-
         except FileNotFoundError:
-            ccx_path = r"C:\calculix_2.23_4win\ccx_static.exe"
-            QMessageBox.critical(self, "Error", f"CalculiX executable not found at: {ccx_path}")
+            QMessageBox.critical(self, "Error", f"CalculiX executable not found at: C:\\calculix_2.23_4win\\ccx_static.exe")
+
+    def run_getdp(self):
+        try:
+            self.write_getdp_pro()
+            # Assuming getdp is in path or at a similar location
+            getdp_path = r"getdp" # User might need to specify this
+
+            # 1. Pre-process (mesh)
+            subprocess.run([getdp_path, "plate.pro", "-pre", "Analysis"], check=True)
+            # 2. Solve
+            subprocess.run([getdp_path, "plate.pro", "-cal", "-solve", "Analysis"], check=True)
+            # 3. Post-process
+            subprocess.run([getdp_path, "plate.pro", "-pos", "Analysis"], check=True)
+
+            QMessageBox.information(self, "Analysis Complete", "GetDP finished successfully.")
+            self.load_results_getdp()
         except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+            QMessageBox.critical(self, "GetDP Error", str(e))
+
+    def write_getdp_pro(self):
+        # Full GetDP formulation for Linear Elasticity (simplified to 2D)
+        with open("plate.pro", "w") as f:
+            f.write("Group {\n")
+            f.write("  Plate = Region[5]; // From Physical Group 5 in gmsh\n")
+            f.write("  Bottom = Region[1];\n")
+            f.write("  Right = Region[2];\n")
+            f.write("  Top = Region[3];\n")
+            f.write("  Left = Region[4];\n")
+            f.write("  Domain = Region[{Plate, Bottom, Right, Top, Left}];\n")
+            f.write("}\n\n")
+
+            f.write("Function {\n")
+            f.write(f"  E = {self.inp_E.value()*1e9}; // Pa\n")
+            f.write(f"  nu = {self.inp_nu.value()};\n")
+            f.write("  lambda = E*nu/((1+nu)*(1-2*nu));\n")
+            f.write("  mu = E/(2*(1+nu));\n")
+            f.write("}\n\n")
+
+            f.write("Constraint {\n")
+            f.write("  { Name Fixed;\n")
+            f.write("    Case {\n")
+            edge_map = {"Bottom (y=0)": "Bottom", "Right (x=a)": "Right", "Top (y=b)": "Top", "Left (x=0)": "Left"}
+            for edge_gui, region in edge_map.items():
+                checks = self.bc_checks[edge_gui]
+                if checks[0].isChecked(): f.write(f"      {{ Region {region}; Value 0.; Node {{1}}; }}\n")
+                if checks[1].isChecked(): f.write(f"      {{ Region {region}; Value 0.; Node {{2}}; }}\n")
+                if checks[2].isChecked(): f.write(f"      {{ Region {region}; Value 0.; Node {{3}}; }}\n")
+            f.write("    }\n")
+            f.write("  }\n")
+            f.write("}\n\n")
+
+            f.write("Jacobian { { Name JVol; Case { { Region All; Jacobian Vol; } } } }\n")
+            f.write("Integration { { Name IVol; Case { { Type Gauss; Case { { GeoElement Quadrangle; NumberOfPoints 4; } } } } } }\n")
+
+            f.write("FunctionSpace {\n")
+            f.write("  { Name Hgrad_u; Type Form0;\n")
+            f.write("    BasisFunction {\n")
+            f.write("      { Name sn; NameOfCoef un; Function BF_Node; Support Domain; Entity NodesOf[Domain]; }\n")
+            f.write("    }\n")
+            f.write("    Constraint { { NameOfCoef un; Entity NodesOf[Domain]; Name Fixed; } }\n")
+            f.write("  }\n")
+            f.write("}\n\n")
+
+            f.write("Formulation {\n")
+            f.write("  { Name Elasticity; Type FemEquation;\n")
+            f.write("    Quantity {\n")
+            f.write("      { Name u; Type Local; NameOfSpace Hgrad_u; }\n")
+            f.write("    }\n")
+            f.write("    Equation {\n")
+            f.write("      Galerkin { [ 2*mu*SymGrad{d u}:Grad{u} + lambda*Div{d u}*Div{u} , Plate ]; Jacobian JVol; Integration IVol; }\n")
+            f.write("    }\n")
+            f.write("  }\n")
+            f.write("}\n\n")
+
+            f.write("Resolution {\n")
+            f.write("  { Name Analysis;\n")
+            f.write("    System { { Name Sys; Formulation Elasticity; } }\n")
+            f.write("    Operation {\n")
+            f.write("      Generate Sys; Solve Sys; SaveSolution Sys;\n")
+            f.write("    }\n")
+            f.write("  }\n")
+            f.write("}\n\n")
+
+            f.write("PostProcessing {\n")
+            f.write("  { Name Analysis; NameOfFormulation Elasticity;\n")
+            f.write("    Quantity {\n")
+            f.write("      { Name u; Value { Local { {u} } }; }\n")
+            f.write("    }\n")
+            f.write("  }\n")
+            f.write("}\n\n")
+
+            f.write("PostOperation {\n")
+            f.write("  { Name Analysis; NameOfPostProcessing Analysis;\n")
+            f.write("    Operation {\n")
+            f.write("      Print [ u, Plate, File \"analysis.msh\", Format Gmsh ];\n")
+            f.write("    }\n")
+            f.write("  }\n")
+            f.write("}\n")
+
+    def load_results_getdp(self):
+        if os.path.exists("analysis.msh"):
+             self.res_combo.clear()
+             self.res_combo.addItem("Mesh Only")
+             self.res_combo.addItem("GetDP Result")
+             # Use meshio to read the result mesh (which should contain data)
 
     def load_results(self):
         from pyccx.results.results import ResultProcessor
@@ -414,6 +527,8 @@ class PlateAnalysisGUI(QMainWindow):
             actual_keys = sorted(self.results_processor.increments.keys())
             if inc_idx - 1 < len(actual_keys):
                 self.visualize_result(actual_keys[inc_idx - 1])
+        elif current == "GetDP Result":
+            self.visualize_mesh("analysis.msh") # GetDP often saves results back to MSH
 
     def open_in_cgx(self):
         cgx_path = r"C:\calculix_2.23_4win\cgx_static.exe"
