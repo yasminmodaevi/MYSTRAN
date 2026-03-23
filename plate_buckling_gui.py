@@ -383,8 +383,7 @@ class PlateAnalysisGUI(QMainWindow):
     def run_getdp(self):
         try:
             self.write_getdp_pro()
-            # Assuming getdp is in path or at a similar location
-            getdp_path = r"getdp" # User might need to specify this
+            getdp_path = r"C:\Portable\getdp-3.5.0-Windows64\getdp.exe"
 
             # 1. Pre-process (mesh)
             subprocess.run([getdp_path, "plate.pro", "-pre", "Analysis"], check=True)
