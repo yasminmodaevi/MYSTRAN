@@ -43,8 +43,8 @@ def test_full_app():
 
     print("Testing buckling...")
     window.analysis_type.setCurrentText("Linear Buckling")
-    window.load_x_s.setText("-1000")
-    window.load_x_e.setText("-1000")
+    window.load_x_start.setText("-1000")
+    window.load_x_end.setText("-1000")
     window.run_analysis()
 
     print("Testing nonlinear...")
