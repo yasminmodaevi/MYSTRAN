@@ -52,17 +52,19 @@ class BucklingGUI(QMainWindow):
         # Material Group
         mat_group = QGroupBox("Material")
         mat_layout = QFormLayout()
-        self.txt_E = QLineEdit("71.7") # GPa
+        self.txt_E = QLineEdit("70.0") # GPa
         self.txt_nu = QLineEdit("0.33")
+        self.txt_rho = QLineEdit("2.72e-9") # t/mm3
         mat_layout.addRow("E (GPa):", self.txt_E)
         mat_layout.addRow("Poisson's nu:", self.txt_nu)
+        mat_layout.addRow("Density (t/mm3):", self.txt_rho)
         mat_group.setLayout(mat_layout)
         sidebar_layout.addWidget(mat_group)
 
         # Analysis Group
         ana_group = QGroupBox("Analysis")
         ana_layout = QFormLayout()
-        self.txt_load = QLineEdit("1000.0") # N
+        self.txt_load = QLineEdit("100.0") # N
         self.cmb_dir = QComboBox()
         self.cmb_dir.addItems(["X-Direction", "Y-Direction"])
         self.cmb_load_type = QComboBox()
@@ -131,11 +133,12 @@ class BucklingGUI(QMainWindow):
         idx = self.cmb_modes.currentIndex()
         val, u_active = self.modes[idx]
 
+        tol = 1e-6
         all_edge_nodes = np.unique(np.concatenate([
-            np.where(np.abs(self.analysis.nodes[:,0])<1e-6)[0],
-            np.where(np.abs(self.analysis.nodes[:,0]-self.analysis.L)<1e-6)[0],
-            np.where(np.abs(self.analysis.nodes[:,1])<1e-6)[0],
-            np.where(np.abs(self.analysis.nodes[:,1]-self.analysis.W)<1e-6)[0]
+            np.where(np.abs(self.analysis.nodes[:,0])<tol)[0],
+            np.where(np.abs(self.analysis.nodes[:,0]-self.analysis.L)<tol)[0],
+            np.where(np.abs(self.analysis.nodes[:,1])<tol)[0],
+            np.where(np.abs(self.analysis.nodes[:,1]-self.analysis.W)<tol)[0]
         ]))
         fixed_dofs = [n*6+2 for n in all_edge_nodes]
         active_dofs = np.setdiff1d(np.arange(self.analysis.num_dofs), fixed_dofs)
@@ -150,25 +153,35 @@ class BucklingGUI(QMainWindow):
 
         self.plotter.clear()
         self.plotter.add_mesh(warped, scalars=uz, cmap="viridis", show_edges=True, scalar_bar_args={"title": "Buckling Mode (UZ)"})
+        # Add nodes
+        self.plotter.add_mesh(warped.points, color="black", point_size=3, render_points_as_spheres=True, label="Nodes")
 
-        # Visualize Springs
+        # Visualize 8 Springs (2 at each corner: X and Y)
         try:
             s_len = float(self.txt_s_len.text())
             spring_points, spring_lines = [], []
             for i, c_idx in enumerate(self.analysis.corner_indices):
                 p_start = warped.points[c_idx]
-                # Ground points (tip)
-                p_end = p_start.copy()
-                if p_start[0] < self.analysis.L/2: p_end[0] -= s_len
-                else: p_end[0] += s_len
-                if p_start[1] < self.analysis.W/2: p_end[1] -= s_len
-                else: p_end[1] += s_len
 
-                spring_points.extend([p_start, p_end])
-                spring_lines.extend([2, 2*i, 2*i+1])
+                # Spring in X
+                p_end_x = p_start.copy()
+                if p_start[0] < self.analysis.L/2: p_end_x[0] -= s_len
+                else: p_end_x[0] += s_len
+                spring_points.extend([p_start, p_end_x])
+                spring_lines.extend([2, 4*i, 4*i+1])
+
+                # Spring in Y
+                p_end_y = p_start.copy()
+                if p_start[1] < self.analysis.W/2: p_end_y[1] -= s_len
+                else: p_end_y[1] += s_len
+                spring_points.extend([p_start, p_end_y])
+                spring_lines.extend([2, 4*i+2, 4*i+3])
 
             spring_mesh = pv.PolyData(np.array(spring_points), lines=np.array(spring_lines))
-            self.plotter.add_mesh(spring_mesh, color="red", line_width=5, label="Spring Elements")
+            self.plotter.add_mesh(spring_mesh, color="red", line_width=4, label="Corner Springs")
+            # Show spring tips (ground)
+            ground_pts = np.array(spring_points)[1::2]
+            self.plotter.add_mesh(ground_pts, color="blue", point_size=6, render_points_as_spheres=True)
         except: pass
 
         self.plotter.add_text(f"Mode {idx+1}\nFactor: {val:.6f}", position='upper_left', font_size=10)
