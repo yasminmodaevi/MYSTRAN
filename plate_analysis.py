@@ -5,7 +5,7 @@ import pygmsh
 import gmsh
 
 class PlateAnalysis:
-    def __init__(self, L, W, thickness, E, nu, hole_diameter, mesh_size=10.0, use_pygmsh=True):
+    def __init__(self, L, W, thickness, E, nu, hole_diameter, mesh_size=15.0, use_pygmsh=True):
         self.L, self.W, self.t, self.E, self.nu, self.d_hole = L, W, thickness, E, nu, hole_diameter
         self.mesh_size = mesh_size
         self.use_pygmsh = use_pygmsh
@@ -13,7 +13,6 @@ class PlateAnalysis:
         if self.use_pygmsh:
             self.nodes, self.elements = self.create_pygmsh_mesh()
         else:
-            # Reverting to radial structured mesh if requested, though pygmsh is now preferred
             self.nodes, self.elements = self.create_radial_mesh()
 
         self.num_nodes, self.num_dofs = len(self.nodes), len(self.nodes) * 6
