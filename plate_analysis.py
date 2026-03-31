@@ -1,18 +1,57 @@
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import eigsh, spsolve
+import pygmsh
+import gmsh
 
 class PlateAnalysis:
-    def __init__(self, L, W, thickness, E, nu, hole_diameter, mesh_params):
-        self.L, self.W, self.t, self.E, self.nu, self.d_hole, self.mesh_params = L, W, thickness, E, nu, hole_diameter, mesh_params
-        self.nodes, self.elements = self.create_mesh()
+    def __init__(self, L, W, thickness, E, nu, hole_diameter, mesh_size=10.0, use_pygmsh=True):
+        self.L, self.W, self.t, self.E, self.nu, self.d_hole = L, W, thickness, E, nu, hole_diameter
+        self.mesh_size = mesh_size
+        self.use_pygmsh = use_pygmsh
+
+        if self.use_pygmsh:
+            self.nodes, self.elements = self.create_pygmsh_mesh()
+        else:
+            # Reverting to radial structured mesh if requested, though pygmsh is now preferred
+            self.nodes, self.elements = self.create_radial_mesh()
+
         self.num_nodes, self.num_dofs = len(self.nodes), len(self.nodes) * 6
         self.G, self.k_s = E / (2 * (1 + nu)), 5.0 / 6.0
         self.gauss_pts = [-1/np.sqrt(3), 1/np.sqrt(3)]
 
-    def create_mesh(self):
-        nr, nt = self.mesh_params
-        if nt % 4 != 0: nt = (nt // 4 + 1) * 4
+    def create_pygmsh_mesh(self):
+        with pygmsh.occ.Geometry() as geom:
+            rect = geom.add_rectangle([0.0, 0.0, 0.0], self.L, self.W)
+            disk = geom.add_disk([self.L/2, self.W/2, 0.0], self.d_hole/2)
+            geom.boolean_difference(rect, disk)
+
+            geom.characteristic_length_min = self.mesh_size
+            geom.characteristic_length_max = self.mesh_size
+
+            gmsh.option.setNumber("Mesh.RecombineAll", 1)
+            gmsh.option.setNumber("Mesh.Algorithm", 8)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)
+
+            mesh = geom.generate_mesh()
+
+            nodes = mesh.points
+            elements = []
+            for cell_block in mesh.cells:
+                if cell_block.type == "quad":
+                    elements = cell_block.data
+                    break
+
+            # Identify corners for springs
+            self.corner_indices = []
+            for c in [[0,0,0], [self.L,0,0], [self.L,self.W,0], [0,self.W,0]]:
+                idx = np.argmin(np.linalg.norm(nodes - c, axis=1))
+                self.corner_indices.append(idx)
+
+            return nodes, np.array(elements)
+
+    def create_radial_mesh(self):
+        nr, nt = 15, 60
         r_hole = self.d_hole / 2
         nodes = []
         r_vals = np.linspace(0, 1, nr + 1)
@@ -32,9 +71,8 @@ class PlateAnalysis:
             for j in range(nt):
                 elements.append([i*nt+j, i*nt+(j+1)%nt, (i+1)*nt+(j+1)%nt, (i+1)*nt+j])
         self.corner_indices = []
-        for c in [[0,0], [self.L,0], [self.L,self.W], [0,self.W]]:
-            idx = np.argmin(np.linalg.norm(nodes[:, :2] - c, axis=1))
-            nodes[idx, :2] = c
+        for c in [[0,0,0], [self.L,0,0], [self.L,self.W,0], [0,self.W,0]]:
+            idx = np.argmin(np.linalg.norm(nodes - c, axis=1))
             self.corner_indices.append(idx)
         return nodes, np.array(elements)
 
@@ -119,7 +157,6 @@ class PlateAnalysis:
             for i in range(24):
                 for j in range(24): Kg_i.append(dofs[i]); Kg_j.append(dofs[j]); Kg_v.append(kge[i, j])
         Kg = csr_matrix((Kg_v, (Kg_i, Kg_j)), shape=(self.num_dofs, self.num_dofs))
-        # Finding SM (Smallest Magnitude) for critical load factors
         vals, vecs = eigsh(K[active, :][:, active], k=num_modes, M=-Kg[active, :][:, active], which='SM', sigma=1e-3)
         idx = np.argsort(np.abs(vals))
         return [(vals[i], vecs[:, i]) for i in idx]

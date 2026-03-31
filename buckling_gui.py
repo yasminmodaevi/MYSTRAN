@@ -10,7 +10,7 @@ from plate_analysis import PlateAnalysis
 class BucklingGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Plate Buckling Analysis - QUAD4 Shell")
+        self.setWindowTitle("Plate Buckling Analysis - QUAD4 Shell (pygmsh)")
         self.resize(1300, 850)
         self.analysis = None
         self.modes = []
@@ -32,10 +32,12 @@ class BucklingGUI(QMainWindow):
         self.txt_W = QLineEdit("200")
         self.txt_t = QLineEdit("2.0")
         self.txt_d_hole = QLineEdit("100")
+        self.txt_m_size = QLineEdit("15.0")
         geo_layout.addRow("Length (X):", self.txt_L)
         geo_layout.addRow("Width (Y):", self.txt_W)
         geo_layout.addRow("Thickness:", self.txt_t)
         geo_layout.addRow("Hole Diameter:", self.txt_d_hole)
+        geo_layout.addRow("Mesh Size:", self.txt_m_size)
         geo_group.setLayout(geo_layout)
         sidebar_layout.addWidget(geo_group)
 
@@ -54,17 +56,15 @@ class BucklingGUI(QMainWindow):
         mat_layout = QFormLayout()
         self.txt_E = QLineEdit("70.0") # GPa
         self.txt_nu = QLineEdit("0.33")
-        self.txt_rho = QLineEdit("2.72e-9") # t/mm3
         mat_layout.addRow("E (GPa):", self.txt_E)
         mat_layout.addRow("Poisson's nu:", self.txt_nu)
-        mat_layout.addRow("Density (t/mm3):", self.txt_rho)
         mat_group.setLayout(mat_layout)
         sidebar_layout.addWidget(mat_group)
 
         # Analysis Group
         ana_group = QGroupBox("Analysis")
         ana_layout = QFormLayout()
-        self.txt_load = QLineEdit("100.0") # N
+        self.txt_load = QLineEdit("4000.0") # N
         self.cmb_dir = QComboBox()
         self.cmb_dir.addItems(["X-Direction", "Y-Direction"])
         self.cmb_load_type = QComboBox()
@@ -104,6 +104,7 @@ class BucklingGUI(QMainWindow):
     def run_analysis(self):
         try:
             L, W, t, d_hole = float(self.txt_L.text()), float(self.txt_W.text()), float(self.txt_t.text()), float(self.txt_d_hole.text())
+            m_size = float(self.txt_m_size.text())
             E, nu = float(self.txt_E.text()) * 1000, float(self.txt_nu.text())
             load, k_spring = float(self.txt_load.text()), float(self.txt_k.text())
             num_modes = int(self.txt_modes.text())
@@ -111,11 +112,10 @@ class BucklingGUI(QMainWindow):
             direction = self.cmb_dir.currentText()[0]
             load_type = 'uniform' if "Uniform" in self.cmb_load_type.currentText() else 'consistent'
 
-            self.lbl_status.setText("Solving...")
+            self.lbl_status.setText("Meshing and Solving...")
             QApplication.processEvents()
 
-            nr, nt = 15, 60
-            self.analysis = PlateAnalysis(L, W, t, E, nu, d_hole, (nr, nt))
+            self.analysis = PlateAnalysis(L, W, t, E, nu, d_hole, mesh_size=m_size, use_pygmsh=True)
             self.modes = self.analysis.solve_buckling(load, k_spring, direction, num_modes, formulation, load_type)
 
             self.cmb_modes.clear()
@@ -127,6 +127,8 @@ class BucklingGUI(QMainWindow):
             self.update_plot()
         except Exception as e:
             self.lbl_status.setText(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def update_plot(self):
         if not self.analysis or self.cmb_modes.currentIndex() < 0: return
@@ -153,37 +155,28 @@ class BucklingGUI(QMainWindow):
 
         self.plotter.clear()
         self.plotter.add_mesh(warped, scalars=uz, cmap="viridis", show_edges=True, scalar_bar_args={"title": "Buckling Mode (UZ)"})
-        # Add nodes
         self.plotter.add_mesh(warped.points, color="black", point_size=3, render_points_as_spheres=True, label="Nodes")
 
-        # Visualize 8 Springs (2 at each corner: X and Y)
         try:
             s_len = float(self.txt_s_len.text())
             spring_points, spring_lines = [], []
             for i, c_idx in enumerate(self.analysis.corner_indices):
                 p_start = warped.points[c_idx]
-
-                # Spring in X
                 p_end_x = p_start.copy()
                 if p_start[0] < self.analysis.L/2: p_end_x[0] -= s_len
                 else: p_end_x[0] += s_len
                 spring_points.extend([p_start, p_end_x])
                 spring_lines.extend([2, 4*i, 4*i+1])
-
-                # Spring in Y
                 p_end_y = p_start.copy()
                 if p_start[1] < self.analysis.W/2: p_end_y[1] -= s_len
                 else: p_end_y[1] += s_len
                 spring_points.extend([p_start, p_end_y])
                 spring_lines.extend([2, 4*i+2, 4*i+3])
-
             spring_mesh = pv.PolyData(np.array(spring_points), lines=np.array(spring_lines))
             self.plotter.add_mesh(spring_mesh, color="red", line_width=4, label="Corner Springs")
-            # Show spring tips (ground)
             ground_pts = np.array(spring_points)[1::2]
             self.plotter.add_mesh(ground_pts, color="blue", point_size=6, render_points_as_spheres=True)
         except: pass
-
         self.plotter.add_text(f"Mode {idx+1}\nFactor: {val:.6f}", position='upper_left', font_size=10)
         self.plotter.reset_camera()
 
