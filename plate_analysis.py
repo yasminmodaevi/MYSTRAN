@@ -6,6 +6,18 @@ import gmsh
 
 class PlateAnalysis:
     def __init__(self, L, W, thickness, E, nu, hole_diameter, mesh_size=15.0, use_pygmsh=True):
+        """
+        Initialize the Plate Buckling Analysis model.
+
+        Args:
+            L, W: Plate dimensions (mm)
+            thickness: Plate thickness (mm)
+            E: Elasticity Modulus (MPa)
+            nu: Poisson's ratio
+            hole_diameter: Diameter of centered hole (mm)
+            mesh_size: Target element size for pygmsh (mm)
+            use_pygmsh: Boolean to use pygmsh (True) or fallback radial mesh (False)
+        """
         self.L, self.W, self.t, self.E, self.nu, self.d_hole = L, W, thickness, E, nu, hole_diameter
         self.mesh_size = mesh_size
         self.use_pygmsh = use_pygmsh
@@ -44,7 +56,7 @@ class PlateAnalysis:
             # Identify corners for springs
             self.corner_indices = []
             for c in [[0,0,0], [self.L,0,0], [self.L,self.W,0], [0,self.W,0]]:
-                idx = np.argmin(np.linalg.norm(nodes - c, axis=1))
+                idx = np.argmin(np.linalg.norm(nodes - np.array(c), axis=1))
                 self.corner_indices.append(idx)
 
             return nodes, np.array(elements)
@@ -71,7 +83,7 @@ class PlateAnalysis:
                 elements.append([i*nt+j, i*nt+(j+1)%nt, (i+1)*nt+(j+1)%nt, (i+1)*nt+j])
         self.corner_indices = []
         for c in [[0,0,0], [self.L,0,0], [self.L,self.W,0], [0,self.W,0]]:
-            idx = np.argmin(np.linalg.norm(nodes - c, axis=1))
+            idx = np.argmin(np.linalg.norm(nodes - np.array(c), axis=1))
             self.corner_indices.append(idx)
         return nodes, np.array(elements)
 
