@@ -31,7 +31,9 @@ async def upload_file(
     if not os.path.exists(rev_path):
         os.makedirs(rev_path)
 
-    file_path = os.path.join(rev_path, file.filename)
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(file.filename)
+    file_path = os.path.join(rev_path, safe_filename)
     sha256_hash = hashlib.sha256()
 
     # Save file to NAS using streaming to handle large CAD/CAE files

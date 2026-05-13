@@ -31,3 +31,26 @@ class Item(ItemBase):
     id: UUID
     created_at: datetime
     revisions: List[ItemRevision] = []
+
+class BOMBase(BaseModel):
+    child_item_id: UUID
+    quantity: float = 1.0
+    bom_type: str = "EBOM"
+    find_number: Optional[int] = None
+
+class BOMCreate(BOMBase):
+    parent_rev_id: UUID
+
+class BOMItem(BOMBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    parent_rev_id: UUID
+
+class BOMNode(BaseModel):
+    item_id: str
+    name: str
+    revision: str
+    quantity: float
+    children: List['BOMNode'] = []
+
+BOMNode.model_rebuild()
