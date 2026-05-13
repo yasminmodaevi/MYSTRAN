@@ -1,8 +1,14 @@
 from fastapi import FastAPI
-from .api.v1 import items, vault, bom, workflow, fea, traceability, signatures, bom_diff
+from .api.v1 import items, vault, bom, workflow, fea, traceability, signatures, bom_diff, auth
+from .db.session import engine
+from .models.plm_models import Base
+
+# Create tables on startup for this demo/scaffold
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="AeroPLM API", version="0.1.0")
 
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
 app.include_router(items.router, prefix="/api/v1/items", tags=["Items"])
 app.include_router(vault.router, prefix="/api/v1/vault", tags=["Vault"])
 app.include_router(bom.router, prefix="/api/v1/bom", tags=["BOM"])

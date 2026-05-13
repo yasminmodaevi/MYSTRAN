@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="DesignReleaseProcess" isExecutable="true">
+    <bpmn:startEvent id="StartEvent_1" name="Design Drafted">
+      <bpmn:outgoing>Flow_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:task id="StressAnalysisTask" name="Perform Stress Analysis">
+      <bpmn:incoming>Flow_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_2</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="StressAnalysisTask" />
+    <bpmn:exclusiveGateway id="StressGateway" name="Stress OK?">
+      <bpmn:incoming>Flow_2</bpmn:incoming>
+      <bpmn:outgoing>Flow_Pass</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Fail</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:sequenceFlow id="Flow_2" sourceRef="StressAnalysisTask" targetRef="StressGateway" />
+    <bpmn:task id="ManagerApprovalTask" name="Manager Approval">
+      <bpmn:incoming>Flow_Pass</bpmn:incoming>
+      <bpmn:outgoing>Flow_Final</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sequenceFlow id="Flow_Pass" name="Yes" sourceRef="StressGateway" targetRef="ManagerApprovalTask" />
+    <bpmn:endEvent id="EndEvent_1" name="Released">
+      <bpmn:incoming>Flow_Final</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_Final" sourceRef="ManagerApprovalTask" targetRef="EndEvent_1" />
+    <bpmn:endEvent id="EndEvent_Fail" name="Rejected">
+      <bpmn:incoming>Flow_Fail</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_Fail" name="No" sourceRef="StressGateway" targetRef="EndEvent_Fail" />
+  </bpmn:process>
+</bpmn:definitions>
