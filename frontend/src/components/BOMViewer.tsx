@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { ChevronRight, ChevronDown, Box } from 'lucide-react';
+import { ChevronRight, ChevronDown, Box, RefreshCw } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { plmApi } from '../services/api';
 
 export interface BOMNode {
   item_id: string;
@@ -43,10 +45,25 @@ const BOMTreeNode = ({ node, depth = 0 }: { node: BOMNode; depth?: number }) => 
   );
 };
 
-export const BOMViewer = ({ data }: { data: BOMNode }) => {
+export const BOMViewer = ({ revId, type = "EBOM" }: { revId: string, type?: string }) => {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['bom', revId, type],
+    queryFn: () => plmApi.getBOM(revId, type),
+    enabled: !!revId,
+  });
+
+  if (isLoading) return <div className="p-4 flex items-center gap-2 text-blue-600"><RefreshCw className="animate-spin" /> Loading BOM...</div>;
+  if (error) return <div className="p-4 text-red-500 font-medium">Error loading BOM structure</div>;
+  if (!data) return <div className="p-4 text-gray-500 italic">No structure defined for this revision.</div>;
+
   return (
     <div className="bg-white border rounded shadow-sm p-4 overflow-auto max-h-[600px]">
-      <h3 className="text-lg font-bold mb-4 text-blue-900 border-b pb-2">BOM Hierarchy</h3>
+      <div className="flex justify-between items-center mb-4 border-b pb-2">
+        <h3 className="text-lg font-bold text-blue-900">BOM Hierarchy ({type})</h3>
+        <button onClick={() => refetch()} className="p-1 hover:bg-gray-100 rounded">
+           <RefreshCw size={16} className="text-gray-400" />
+        </button>
+      </div>
       <BOMTreeNode node={data} />
     </div>
   );
