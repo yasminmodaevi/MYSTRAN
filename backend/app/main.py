@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .api.v1 import items, vault, bom, workflow, fea
+from .api.v1 import items, vault, bom, workflow, fea, traceability, signatures
 
 app = FastAPI(title="AeroPLM API", version="0.1.0")
 
@@ -8,6 +8,8 @@ app.include_router(vault.router, prefix="/api/v1/vault", tags=["Vault"])
 app.include_router(bom.router, prefix="/api/v1/bom", tags=["BOM"])
 app.include_router(workflow.router, prefix="/api/v1/workflow", tags=["Workflow"])
 app.include_router(fea.router, prefix="/api/v1/fea", tags=["FEA"])
+app.include_router(traceability.router, prefix="/api/v1/traceability", tags=["Traceability"])
+app.include_router(signatures.router, prefix="/api/v1/signatures", tags=["Signatures"])
 
 @app.get("/")
 async def root():

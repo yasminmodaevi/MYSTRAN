@@ -4,6 +4,7 @@ from typing import List
 from ...db.session import get_db
 from ...models.plm_models import Item, ItemRevision
 from ...schemas.plm_schemas import ItemCreate, Item as ItemSchema, ItemRevisionCreate
+from ...core.audit_logger import log_event
 
 router = APIRouter()
 
@@ -18,6 +19,8 @@ def create_item(item: ItemCreate, db: Session = Depends(get_db)):
     db.add(db_item)
     db.commit()
     db.refresh(db_item)
+
+    log_event(db, "system", "CREATE", "ITEM", str(db_item.id), new_val=item.model_dump())
 
     # Create initial revision 'A'
     initial_rev = ItemRevision(
